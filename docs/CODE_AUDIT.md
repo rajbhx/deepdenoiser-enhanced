@@ -10,6 +10,24 @@ runtime reproduction. Items marked *verify* need a device build to confirm.
 
 ---
 
+## Fix status for this repository
+
+This commit applies the **P0 remediation set** from the audit below. The audit text is kept
+verbatim as the "as-found" record; the findings listed here are resolved in this tree:
+
+| ID | Status | What changed |
+|---|---|---|
+| AUD-01 | ✅ fixed | `DeepFilterNet.createStream()` / `StreamState` — recurrent state is now owned per pipeline, not by the shared session. `beginRun`/`endRun` in `denoiserSingleton.ts` defer engine resets until no pipeline is active. Both screens updated. |
+| AUD-02 | ✅ fixed | 5× `COLORS.textSecondary` → `COLORS.subtext`; tightened the `AttenPreset` preset cast; added `typecheck` script + CI `tsc --noEmit` step. |
+| AUD-03 | ✅ fixed | `MediaProcessor : Closeable` calling `mediaTransformer.release()`; all 7 native entry points now wrap it in `.use { }`. |
+| AUD-04 | ✅ fixed | `decodeToPCM` EOS fallback now drains every output buffer until `BUFFER_FLAG_END_OF_STREAM` (bounded retries), instead of breaking after one. |
+| AUD-15 | ✅ fixed (bonus) | `processFrame` zeroes `inputFrameData` before copying a frame. |
+| AUD-16 | ✅ fixed (bonus) | `setStreamAttenLimDb()` allows mid-stream strength changes. |
+| AUD-37 | ✅ fixed (bonus) | `moduleScope` uses a `SupervisorJob`. |
+
+**Still open:** AUD-05 … AUD-40 (except the above). Nothing here has been run on a device —
+the Kotlin changes in particular need an Android build + smoke test before release.
+
 ## Executive summary
 
 The project is competently structured and genuinely privacy-first: no secrets, no keys, no

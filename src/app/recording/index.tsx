@@ -6,8 +6,8 @@ import ShareBtn from "@/src/components/shareBtn";
 import SilenceTrimSettingsBlock from "@/src/components/silenceTrimSettings";
 import * as theme from "@/src/constants/theme";
 import { trackAppError, trackAppEvent } from "@/src/scripts/analytics";
-import type { DeepFilterNet } from "@/src/scripts/Denoiser";
-import { getDenoiser } from "@/src/scripts/denoiserSingleton";
+import type { DeepFilterNet, StreamState } from "@/src/scripts/Denoiser";
+import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
 import { PCMtoWav, writePCMChunk } from "@/src/scripts/formatHandler";
 import {
   ATTEN_PRESET_DB,
@@ -92,6 +92,9 @@ export default function RecordingScreen() {
     useState<SilenceTrimSettings>(DEFAULT_SILENCE_TRIM);
 
   const denoiserRef = useRef<DeepFilterNet | null>(null);
+  /** Per-recording recurrent state — never shared with the file pipeline. */
+  const streamRef = useRef<StreamState | null>(null);
+  const runActiveRef = useRef(false);
   const audioBufferRef = useRef<Float32Array>(new Float32Array(0));
   const processingQueueRef = useRef<Promise<void>>(Promise.resolve());
   const queueDepthRef = useRef(0);
@@ -153,6 +156,10 @@ export default function RecordingScreen() {
       // be set so late stream events are dropped instead of appending to the
       // processing queue after the screen is gone.
       isStoppingRef.current = true;
+      if (runActiveRef.current) {
+        runActiveRef.current = false;
+        endRun();
+      }
       if (isRecordingRef.current) {
         stopAudioRecording()
           .then(drainQueue)
@@ -248,11 +255,13 @@ export default function RecordingScreen() {
                 denoisedOutput.set(processData);
               } else {
                 if (wasPassthroughRef.current) {
-                  denoiser.setupStreaming(attenLimDb);
+                  streamRef.current = denoiser.createStream(attenLimDb);
                 }
+                const stream = streamRef.current;
+                if (!stream) throw new Error("Denoise stream not initialized");
                 for (let i = 0; i < processableLength; i += HOP_SIZE) {
                   const frame = processData.subarray(i, i + HOP_SIZE);
-                  await denoiser.processFrame(frame, denoisedOutput, i);
+                  await denoiser.processFrame(stream, frame, denoisedOutput, i);
                 }
               }
               wasPassthroughRef.current = passthrough;
@@ -316,7 +325,7 @@ export default function RecordingScreen() {
       wasPassthroughRef.current = false;
 
       // Reset denoiser states for new recording
-      denoiserRef.current?.setupStreaming(attenLimDb);
+      streamRef.current = denoiserRef.current?.createStream(attenLimDb) ?? null;
 
       const config: RecordingConfig = {
         sampleRate: SAMPLE_RATE,
@@ -329,8 +338,16 @@ export default function RecordingScreen() {
         showNotification: false,
       };
 
+      if (!runActiveRef.current) {
+        beginRun();
+        runActiveRef.current = true;
+      }
       await startAudioRecording(config);
     } catch (error) {
+      if (runActiveRef.current) {
+        runActiveRef.current = false;
+        endRun();
+      }
       const err = error instanceof Error ? error : new Error(String(error));
       trackAppError(err, { context: "startRecording" });
       setError(err);
@@ -360,7 +377,10 @@ export default function RecordingScreen() {
           const paddedFrame = new Float32Array(HOP_SIZE);
           paddedFrame.set(leftovers);
           const outBuf = new Float32Array(HOP_SIZE);
+          const tailStream = streamRef.current;
+          if (!tailStream) throw new Error("Denoise stream not initialized");
           const outFrame = await denoiserRef.current.processFrame(
+            tailStream,
             paddedFrame,
             outBuf,
           );
@@ -401,6 +421,10 @@ export default function RecordingScreen() {
       setError(err);
       setIsErrorModalVisible(true);
     } finally {
+      if (runActiveRef.current) {
+        runActiveRef.current = false;
+        endRun();
+      }
       setIsFinalizing(false);
       isStoppingRef.current = false;
       originalPcmFileRef.current = null;
@@ -493,7 +517,7 @@ export default function RecordingScreen() {
                     ["strong", "Strong"],
                     ["medium", "Med"],
                     ["light", "Light"],
-                  ] as [AttenPreset, string][]).map(([id, label]) => {
+                  ] as [Exclude<AttenPreset, "custom">, string][]).map(([id, label]) => {
                     const on = attenPreset === id;
                     return (
                       <TouchableOpacity
@@ -716,7 +740,7 @@ export default function RecordingScreen() {
 
 const styles = StyleSheet.create({
   presetLabel: {
-    color: theme.COLORS.textSecondary,
+    color: theme.COLORS.subtext,
     fontSize: 13,
     fontWeight: "600",
     marginBottom: 8,

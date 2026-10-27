@@ -91,6 +91,10 @@ trying NNAPI/GPU acceleration, CPU fallback, thread counts, live-record UI, and 
 
 I have **not** changed, shared, renamed, or deleted anything in Drive — this was read-only.
 
+> **Note:** the copy of the source in this repository is *not* byte-identical to the Drive
+> tarball. The P0 fixes from `CODE_AUDIT.md` have been applied. The original Drive archive
+> (MD5 `3b977ba59c67368c316bd11e8635e380`) remains unchanged.
+
 ---
 
 ## Files in the workspace

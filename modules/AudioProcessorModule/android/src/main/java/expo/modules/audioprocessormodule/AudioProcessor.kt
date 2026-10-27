@@ -14,6 +14,7 @@ import com.linkedin.android.litr.TransformationListener
 import com.linkedin.android.litr.TransformationOptions
 import com.linkedin.android.litr.analytics.TrackTransformationInfo
 import java.io.BufferedInputStream
+import java.io.Closeable
 import java.io.EOFException
 import java.io.File
 import java.io.FileInputStream
@@ -32,9 +33,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
-class MediaProcessor(private val context: Context) {
+class MediaProcessor(private val context: Context) : Closeable {
 
     private val mediaTransformer = MediaTransformer(context.applicationContext)
+
+    /**
+     * LiTr owns a HandlerThread and MUST be released. Previously every native
+     * call constructed a MediaProcessor (and therefore a transformer) that was
+     * never released, leaking a thread per transcode (AUD-03).
+     */
+    override fun close() {
+        try {
+            mediaTransformer.release()
+        } catch (e: Exception) {
+            // Transformer already released / never started — nothing to do.
+        }
+    }
 
     private fun getSafeUri(path: String): Uri {
         return try {
@@ -569,26 +583,44 @@ class MediaProcessor(private val context: Context) {
                         when {
                             outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
                                 if (isEOS) {
+                                    // AUD-04: drain EVERY remaining output buffer until
+                                    // the codec reports END_OF_STREAM. The old code
+                                    // broke after the first buffer, truncating the tail
+                                    // of decoded PCM on some devices/codecs.
                                     var tryAgainCount = 0
-                                    while (tryAgainCount < 5) {
+                                    var drainedEos = false
+                                    while (!drainedEos && tryAgainCount < 10) {
                                         val drainIndex = codec.dequeueOutputBuffer(info, 20000L)
-                                        if (drainIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                                            tryAgainCount++
-                                            continue
-                                        }
-                                        if (drainIndex >= 0) {
-                                            val drainBuffer = codec.getOutputBuffer(drainIndex)
-                                                ?: throw Exception("Output buffer null for index $drainIndex")
-                                            drainBuffer.position(info.offset)
-                                            drainBuffer.limit(info.offset + info.size)
-                                            if (channels > 1 && info.size > 0) {
-                                                writeDownmixedMono(drainBuffer, info, channels, outputStream!!)
-                                            } else if (info.size > 0) {
-                                                writeMonoChunk(drainBuffer, info, outputStream!!)
+                                        when {
+                                            drainIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                                                tryAgainCount++
                                             }
-                                            codec.releaseOutputBuffer(drainIndex, false)
+                                            drainIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                                                val newFormat = codec.outputFormat
+                                                if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                                                    channels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                                                    if (channels <= 0) channels = 1
+                                                }
+                                            }
+                                            drainIndex >= 0 -> {
+                                                val drainBuffer = codec.getOutputBuffer(drainIndex)
+                                                    ?: throw Exception("Output buffer null for index $drainIndex")
+                                                drainBuffer.position(info.offset)
+                                                drainBuffer.limit(info.offset + info.size)
+                                                if (info.size > 0) {
+                                                    if (channels > 1) {
+                                                        writeDownmixedMono(drainBuffer, info, channels, outputStream!!)
+                                                    } else {
+                                                        writeMonoChunk(drainBuffer, info, outputStream!!)
+                                                    }
+                                                }
+                                                val flags = info.flags
+                                                codec.releaseOutputBuffer(drainIndex, false)
+                                                if ((flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                                    drainedEos = true
+                                                }
+                                            }
                                         }
-                                        break
                                     }
                                     break
                                 }

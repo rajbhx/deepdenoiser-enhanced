@@ -86,7 +86,7 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
                       ["strong", "Strong"],
                       ["medium", "Med"],
                       ["light", "Light"],
-                    ] as [AttenPreset, string][]
+                    ] as [Exclude<AttenPreset, "custom">, string][]
                   ).map(([id, label]) => {
                     const selected = settings.attenPreset === id;
                     return (
@@ -258,7 +258,7 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 13,
     fontWeight: "600",
-    color: theme.COLORS.textSecondary,
+    color: theme.COLORS.subtext,
     marginBottom: 16,
     textTransform: "uppercase",
     letterSpacing: 0.5,
@@ -281,7 +281,7 @@ const styles = StyleSheet.create({
   },
   settingDescription: {
     fontSize: 12,
-    color: theme.COLORS.textSecondary,
+    color: theme.COLORS.subtext,
     lineHeight: 16,
   },
   coreRow: {
@@ -318,12 +318,12 @@ const styles = StyleSheet.create({
   },
   version: {
     fontSize: 12,
-    color: theme.COLORS.textSecondary,
+    color: theme.COLORS.subtext,
     textAlign: "center",
   },
   note: {
     fontSize: 11,
-    color: theme.COLORS.textSecondary,
+    color: theme.COLORS.subtext,
     textAlign: "center",
     marginTop: 6,
     opacity: 0.7,

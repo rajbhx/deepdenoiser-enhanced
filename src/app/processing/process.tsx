@@ -6,7 +6,7 @@ import ShareBtn from "@/src/components/shareBtn";
 import VideoPlayer from "@/src/components/videoPlayer";
 import * as theme from "@/src/constants/theme";
 import { trackAppError, trackAppEvent } from "@/src/scripts/analytics";
-import { getDenoiser } from "@/src/scripts/denoiserSingleton";
+import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
 import {
   buildCacheKey,
   buildDecodeKey,
@@ -170,6 +170,7 @@ export default function ProcessScreen() {
       console.warn("Denoise cache lookup failed, proceeding fresh:", err);
     }
 
+    beginRun();
     setDenoising(true);
     setProgress(0);
     setProgressText("Initializing...");
@@ -262,7 +263,7 @@ export default function ProcessScreen() {
         const targetRate = 48000;
         const hopSize = 512;
         const fftSize = 960;
-        denoiser.setupStreaming(attenLimDb);
+        const stream = denoiser.createStream(attenLimDb);
 
         denoisedPcmFile = new fs.File(fs.Paths.cache, stagePcmPath("stage_dn"));
 
@@ -292,7 +293,7 @@ export default function ProcessScreen() {
             const denoisedOutput = new Float32Array(processLen);
             for (let i = 0; i < processLen; i += hopSize) {
               const frame = toProcess.subarray(i, i + hopSize);
-              await denoiser.processFrame(frame, denoisedOutput, i);
+              await denoiser.processFrame(stream, frame, denoisedOutput, i);
             }
 
             let finalOutputChunk = denoisedOutput;
@@ -333,7 +334,7 @@ export default function ProcessScreen() {
           const padded = new Float32Array(hopSize);
           padded.set(inputBuffer);
           const outBuf = new Float32Array(hopSize);
-          const outFrame = await denoiser.processFrame(padded, outBuf);
+          const outFrame = await denoiser.processFrame(stream, padded, outBuf);
           let finalFrame = outFrame.subarray(0, inputBuffer.length);
           if (outputSamplesSkipped < fftSize) {
             const skip = Math.min(
@@ -410,6 +411,7 @@ export default function ProcessScreen() {
       setIsErrorModalVisible(true);
       trackAppError(err, { context: "handleDenoise" });
     } finally {
+      endRun();
       setDenoising(false);
       setProgressText("");
       setEta(null);

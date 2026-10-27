@@ -6,11 +6,36 @@ let instance: DeepFilterNet | null = null;
 let loadPromise: Promise<DeepFilterNet> | null = null;
 let loadedKey: string | null = null;
 
+/**
+ * Number of in-flight pipelines using the shared session. SettingsSidebar
+ * calls resetDenoiser() on runtime/core changes; releasing the session under
+ * an active session.run() used to free native memory mid-inference (AUD-01).
+ */
+let activeRuns = 0;
+let pendingReset = false;
+
+export function beginRun(): void {
+  activeRuns++;
+}
+
+export function endRun(): void {
+  activeRuns = Math.max(0, activeRuns - 1);
+  if (activeRuns === 0 && pendingReset) {
+    pendingReset = false;
+    void resetDenoiser();
+  }
+}
+
 export function getEngineLabel(): string {
   return instance?.lastEngine ?? "not-loaded";
 }
 
 export async function resetDenoiser(): Promise<void> {
+  if (activeRuns > 0) {
+    // Defer until the last pipeline finishes (endRun triggers it).
+    pendingReset = true;
+    return;
+  }
   const current = instance;
   instance = null;
   loadPromise = null;

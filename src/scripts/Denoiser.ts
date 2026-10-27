@@ -1,6 +1,16 @@
 import metadata from "@/assets/model/model_metadata.json";
 import { InferenceSession, Tensor } from "onnxruntime-react-native";
 
+/** Recurrent state for ONE denoise stream. Never share between pipelines. */
+export interface StreamState {
+    states: Tensor | Tensor[];
+    stateBuffers: Float32Array[];
+    attenLimDb: Tensor;
+    attenLimDbData: Float32Array;
+    inputFrameData: Float32Array;
+    inputFrame: Tensor;
+}
+
 export class DeepFilterNet {
     private session: InferenceSession | null = null;
     private readonly hopSize: number;
@@ -12,13 +22,31 @@ export class DeepFilterNet {
     private readonly inputNames: string[];
     private readonly outputNames: string[];
 
-    private streamStates: {
-        states: Tensor | Tensor[];
-        stateBuffers: Float32Array[];
-        attenLimDb: Tensor;
-        inputFrameData: Float32Array;
-        inputFrame: Tensor;
-    } | null = null;
+    /**
+     * Streaming state is now owned by the CALLER, not by this class. The ONNX
+     * session is a process-wide singleton shared by the file-denoise and live
+     * recording screens; keeping recurrent state on the session meant one
+     * screen could reset the other's state mid-stream (AUD-01).
+     */
+    public createStream(attenLimDbValue: number = 0.0): StreamState {
+        const { states, stateBuffers, attenLimDb, attenLimDbData } =
+            this.initStates(attenLimDbValue);
+        const inputFrameData = new Float32Array(this.hopSize);
+        const inputFrame = new Tensor("float32", inputFrameData, [this.hopSize]);
+        return {
+            states,
+            stateBuffers,
+            attenLimDb,
+            attenLimDbData,
+            inputFrameData,
+            inputFrame,
+        };
+    }
+
+    /** Safe to call mid-stream (AUD-16): mutates the tensor's backing buffer. */
+    public setStreamAttenLimDb(state: StreamState, value: number): void {
+        state.attenLimDbData[0] = value;
+    }
 
     constructor() {
         this.hopSize = metadata.hop_size;
@@ -123,29 +151,18 @@ export class DeepFilterNet {
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
-    public setupStreaming(attenLimDbValue: number = 0.0): void {
-        const { states, stateBuffers, attenLimDb } = this.initStates(attenLimDbValue);
-        const inputFrameData = new Float32Array(this.hopSize);
-        const inputFrame = new Tensor("float32", inputFrameData, [this.hopSize]);
-        this.streamStates = {
-            states,
-            stateBuffers,
-            attenLimDb,
-            inputFrameData,
-            inputFrame,
-        };
-    }
-
     public async processFrame(
+        state: StreamState,
         frame: Float32Array,
         dest?: Float32Array,
         destOffset = 0,
     ): Promise<Float32Array> {
         if (!this.session) throw new Error("Session not initialized");
-        if (!this.streamStates) throw new Error("Streaming not setup. Call setupStreaming() first.");
 
-        const { states, stateBuffers, attenLimDb, inputFrameData, inputFrame } = this.streamStates;
+        const { states, stateBuffers, attenLimDb, inputFrameData, inputFrame } = state;
 
+        // Clear the tail so a short final frame never replays stale samples (AUD-15).
+        inputFrameData.fill(0);
         inputFrameData.set(frame);
 
         const feeds: Record<string, Tensor> = {
@@ -195,21 +212,17 @@ export class DeepFilterNet {
             try {
                 await this.session.release();
                 this.session = null;
-                this.streamStates = null;
             } catch (e) {
                 console.error("Failed to release InferenceSession:", e);
             }
         }
     }
 
-    public resetStates(): void {
-        this.streamStates = null;
-    }
-
     private initStates(attenLimDbValue: number = 0.0): {
         states: Tensor | Tensor[];
         stateBuffers: Float32Array[];
         attenLimDb: Tensor;
+        attenLimDbData: Float32Array;
     } {
         let states: Tensor | Tensor[];
         let stateBuffers: Float32Array[];
@@ -234,8 +247,9 @@ export class DeepFilterNet {
             }
         }
 
-        const attenLimDb = new Tensor("float32", new Float32Array([attenLimDbValue]), [1]);
-        return { states, stateBuffers, attenLimDb };
+        const attenLimDbData = new Float32Array([attenLimDbValue]);
+        const attenLimDb = new Tensor("float32", attenLimDbData, [1]);
+        return { states, stateBuffers, attenLimDb, attenLimDbData };
     }
 
     /**
