@@ -80,6 +80,16 @@ jobs:
       - name: Expo Prebuild (Android only)
         run: bunx expo prebuild --platform android --clean --no-install
 
+      - name: Tune Gradle memory
+        # :app:packageRelease OOMs on the default 2g heap when ZipFlinger
+        # buffers the 13MB .ort model plus RN/ONNX native libs. Duplicate keys
+        # in gradle.properties are last-wins, so this overrides Expo's default.
+        run: |
+          cat >> android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
+          org.gradle.workers.max=2
+          EOF
+
       - name: Determine build command
         id: build
         run: |

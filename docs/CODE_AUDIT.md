@@ -25,6 +25,10 @@ verbatim as the "as-found" record; the findings listed here are resolved in this
 | AUD-16 | ✅ fixed (bonus) | `setStreamAttenLimDb()` allows mid-stream strength changes. |
 | AUD-37 | ✅ fixed (bonus) | `moduleScope` uses a `SupervisorJob`. |
 
+**CI (separate from the audit):** the pushed workflow also replaces the broken
+`setup-android@v3` action, adds a `bunx tsc --noEmit` gate, and raises the Gradle
+heap from 2g to 4g so `:app:packageRelease` does not OOM on the ONNX model.
+
 **Still open:** AUD-05 … AUD-40 (except the above). Nothing here has been run on a device —
 the Kotlin changes in particular need an Android build + smoke test before release.
 
