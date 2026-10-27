@@ -1,0 +1,128 @@
+import * as theme from "@/src/constants/theme";
+import { useFocusEffect } from "expo-router/react-navigation";
+import { useVideoPlayer, VideoView } from "expo-video";
+import React, { useCallback, useRef } from "react";
+import {
+  StyleSheet,
+  Text,
+  View
+} from "react-native";
+
+
+interface VideoPlayerProps {
+  uri: string;
+  name: string;
+}
+
+const VideoPlayer: React.FC<VideoPlayerProps> = ({ uri, name }) => {
+  const cleanupRef = useRef(false);
+
+  const player = useVideoPlayer(uri, (player) => {
+    player.loop = false;
+    player.muted = false;
+  });
+  useFocusEffect(useCallback(() => {
+    cleanupRef.current = false;
+    return () => {
+      if (cleanupRef.current) return;
+      cleanupRef.current = true;
+      try {
+        if (player) {
+          if (player.playing) player.pause();
+          player.release();
+        }
+      } catch (error) {
+        console.warn("VideoPlayer failed to load media:", error);
+      }
+    };
+  },
+    [player]));
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.videoContainer}>
+
+        <VideoView
+          style={styles.video}
+          player={player}
+          fullscreenOptions={{ enable: true }}
+          contentFit="contain"
+        />
+
+      </View>
+
+      <View style={styles.footer}>
+        <View style={styles.infoContainer}>
+          <Text style={styles.title} numberOfLines={1}>{name}</Text>
+
+        </View>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  card: {
+    backgroundColor: theme.COLORS.surface,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: theme.COLORS.border,
+    overflow: "hidden",
+    width: "100%",
+  },
+  videoContainer: {
+    width: "100%",
+    aspectRatio: 16 / 9,
+    backgroundColor: "#000",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  video: {
+    width: "100%",
+    height: "100%",
+  },
+  loaderContainer: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(15, 23, 42, 0.5)",
+  },
+  errorContainer: {
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  errorText: {
+    color: theme.COLORS.error,
+    marginTop: 10,
+    fontSize: theme.FONT_SIZE.body,
+    fontWeight: "600",
+  },
+  footer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: theme.SPACING.medium,
+    backgroundColor: theme.COLORS.surface,
+  },
+  infoContainer: {
+    flex: 1,
+  },
+  title: {
+    color: theme.COLORS.text,
+    fontSize: theme.FONT_SIZE.body,
+    fontWeight: "700",
+  },
+  subtitle: {
+    color: theme.COLORS.subtext,
+    fontSize: theme.FONT_SIZE.xsmall,
+    marginTop: 2,
+  },
+
+});
+
+export default VideoPlayer;

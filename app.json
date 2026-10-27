@@ -1,0 +1,111 @@
+{
+  "expo": {
+    "icon": "./assets/images/icon.png",
+    "scheme": "deepdenoiser",
+    "userInterfaceStyle": "dark",
+    "platforms": [
+      "android"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sayampy.deepdenoiser"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#010100",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      "./plugins/withNdkVersion",
+      "./plugins/DisableDependencyInfo",
+      "./plugins/withOnnxruntime",
+      "./plugins/withLargeHeap",
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "buildArchs": [
+              "arm64-v8a"
+            ],
+            "enableBundleCompression": true,
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "enablePngCrunchInReleaseBuilds": true,
+            "extraProguardRules": "-keep class expo.modules.ui.** { *; }\n-keep class ai.onnxruntime.** { *; }\n-keep class com.linkedin.android.litr.** { *; }\n-keep class * implements expo.modules.core.interfaces.ReactActivityLifecycleListener { *; }\n-keep class expo.modules.sharing.** { *; }",
+            "minSdkVersion": 26
+          },
+          "shared": {
+            "useHermesV1": true
+          }
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#000000",
+          "dark": {
+            "backgroundColor": "#000000"
+          }
+        }
+      ],
+      "expo-font",
+      "expo-image",
+      [
+        "expo-media-library",
+        {
+          "isAccessMediaLocationEnabled": true,
+          "granularPermissions": [
+            "audio",
+            "video"
+          ]
+        }
+      ],
+      "expo-asset",
+      "expo-video",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow DeepDenoiser to access your microphone for voice recording and denoising.",
+          "enableBackgroundRecording": true
+        }
+      ],
+      [
+        "expo-sharing",
+        {
+          "android": {
+            "enabled": true,
+            "singleShareMimeTypes": [
+              "video/*",
+              "audio/*"
+            ]
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "41ed1c57-7435-4d0a-985f-24ac62b32272"
+      }
+    },
+    "owner": "deepdenoiser",
+    "version": "1.5.0"
+  }
+}
