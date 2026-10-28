@@ -32,6 +32,51 @@ heap from 2g to 4g so `:app:packageRelease` does not OOM on the ONNX model.
 **Still open:** AUD-05 … AUD-40 (except the above). Nothing here has been run on a device —
 the Kotlin changes in particular need an Android build + smoke test before release.
 
+## Post-audit runtime fix — document picker (28 Oct 2026)
+
+**Reported symptom (release build, Android):**
+`ExpoDocumentPicker.getDocumentAsync` rejects with
+"Different document picking in progress. Await other document picking first."
+
+**Root cause.** In `expo-document-picker@57.0.1`'s Android module,
+`pendingPromise` is assigned *before* `startActivityForResult` and cleared
+*only* from `OnActivityResult`. Two paths leave it set for the lifetime of the
+process:
+
+1. A second `getDocumentAsync()` while the picker is still open (fast double
+   tap, or a second call site) throws `PickingInProgressException`.
+2. A lost activity result — Android Back, an OEM file manager, or the host
+   activity being recreated while the picker is up — never settles the promise.
+   Every later pick then fails with the same error. This is a long-standing
+   upstream issue (expo/expo#21578, #21064).
+
+The app had a single unguarded call site in `src/app/(tabs)/index.tsx`, and the
+Import button was not disabled while the picker was open.
+
+**Fix (two layers).**
+
+- `patches/expo-document-picker+57.0.1.patch` (applied by the existing
+  `postinstall: patch-package`): clears `pendingPromise` if the launcher
+  throws, always releases it via `finally` in `OnActivityResult`, and adds a
+  zero-argument `cancelPendingPick()` escape hatch that settles a stale pick as
+  a cancellation.
+- `src/scripts/documentPicker.ts`: a serialised wrapper that (a) ignores
+  concurrent taps, (b) watches `AppState` and recovers a lost result after an
+  8s resume grace (3min hard ceiling), (c) on a surviving
+  `PickingInProgress` error calls `cancelPendingPick()` and retries once, and
+  (d) always releases its own JS-side lock. `index.tsx` now uses it with a
+  `useRef` double-tap guard and a disabled Import card.
+
+**Verification.** Strict `tsc --noEmit` (TS 6.0.3) clean on the new module;
+full-project check has 0 internal errors. `patch-package` applies the patch
+cleanly and idempotently. A 15-case Node harness simulated normal picks,
+double taps, lost activity results, an already-wedged module, and a resumed
+pick followed by a fresh tap — all passed. **Still needs a real Android
+device/build to confirm the Kotlin patch compiles and the flow feels right.**
+
+> This was found in the field after the static audit; the 40-row
+> `CODE_AUDIT_FINDINGS.csv` tracker is unchanged.
+
 ## Executive summary
 
 The project is competently structured and genuinely privacy-first: no secrets, no keys, no

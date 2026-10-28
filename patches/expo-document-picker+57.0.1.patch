@@ -1,0 +1,81 @@
+--- a/node_modules/expo-document-picker/android/src/main/java/expo/modules/documentpicker/DocumentPickerModule.kt
++++ b/node_modules/expo-document-picker/android/src/main/java/expo/modules/documentpicker/DocumentPickerModule.kt
+@@ -49,7 +49,34 @@
+           options.type[0]
+         }
+       }
+-      appContext.throwingActivity.startActivityForResult(intent, OPEN_DOCUMENT_CODE)
++      try {
++        appContext.throwingActivity.startActivityForResult(intent, OPEN_DOCUMENT_CODE)
++      } catch (e: Exception) {
++        // If the launcher throws, OnActivityResult will never fire. Without this
++        // the module stays wedged for the rest of the process and every later
++        // pick fails with PickingInProgressException.
++        if (pendingPromise === promise) {
++          pendingPromise = null
++        }
++        throw e
++      }
++    }
++
++    /**
++     * Recovery hatch for a lost activity result: Android Back, OEM file pickers
++     * and activity recreation can all drop onActivityResult, leaving
++     * pendingPromise set forever. JS calls this to settle that stale promise as
++     * a cancellation so a fresh getDocumentAsync can start.
++     */
++    AsyncFunction("cancelPendingPick") { promise: Promise ->
++      val stale = pendingPromise
++      pendingPromise = null
++      try {
++        stale?.resolve(DocumentPickerResult(canceled = true))
++      } catch (e: Exception) {
++        // Already settled - nothing left to do.
++      }
++      promise.resolve(null)
+     }
+ 
+     OnActivityResult { _, (requestCode, resultCode, intent) ->
+@@ -59,23 +86,28 @@
+ 
+       val promise = pendingPromise!!
+ 
+-      if (resultCode == Activity.RESULT_OK) {
+-        try {
+-          if (intent?.clipData != null) {
+-            handleMultipleSelection(intent)
+-          } else {
+-            handleSingleSelection(intent)
++      try {
++        if (resultCode == Activity.RESULT_OK) {
++          try {
++            if (intent?.clipData != null) {
++              handleMultipleSelection(intent)
++            } else {
++              handleSingleSelection(intent)
++            }
++          } catch (e: Exception) {
++            promise.reject(e.toCodedException())
+           }
+-        } catch (e: Exception) {
+-          promise.reject(e.toCodedException())
++        } else {
++          promise.resolve(
++            DocumentPickerResult(canceled = true)
++          )
++        }
++      } finally {
++        // Always release the slot, even if resolve/reject throws.
++        if (pendingPromise === promise) {
++          pendingPromise = null
+         }
+-      } else {
+-        promise.resolve(
+-          DocumentPickerResult(canceled = true)
+-        )
+       }
+-
+-      pendingPromise = null
+     }
+   }
+ 

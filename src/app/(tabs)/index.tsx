@@ -3,9 +3,9 @@ import ErrorModal from "@/src/components/ErrorModal";
 import VideoPlayer from "@/src/components/videoPlayer";
 import * as theme from "@/src/constants/theme";
 import { importToDocuments, cleanupTempCache } from "@/src/scripts/denoiseCache";
+import { pickDocument } from "@/src/scripts/documentPicker";
 import Feather from "@expo/vector-icons/Feather";
 
-import * as DocumentPicker from "expo-document-picker";
 import * as fs from "expo-file-system";
 import { useRouter } from "expo-router";
 import { useIncomingShare } from "expo-sharing";
@@ -48,6 +48,8 @@ export default function HomeScreen() {
     error: shareError,
   } = useIncomingShare();
   const shareHandledRef = useRef(false);
+  /** Synchronous double-tap guard (React state updates are async). */
+  const importInFlightRef = useRef(false);
 
   useEffect(() => {
     if (shareHandledRef.current || isShareResolving) return;
@@ -102,38 +104,44 @@ export default function HomeScreen() {
   }, []);
 
   const handleImportFile = async () => {
+    // The native picker allows only one in-flight request. A ref guard is
+    // needed because a second tap can arrive before React re-renders with the
+    // isLoading flag; pickDocument() also serialises at module level.
+    if (importInFlightRef.current) return;
+    importInFlightRef.current = true;
+    setIsLoading(true);
     try {
-      const result = await DocumentPicker.getDocumentAsync({
+      const result = await pickDocument({
         type: ["audio/*", "video/*"],
         copyToCacheDirectory: true,
       });
 
-      if (result.canceled) return;
+      // canceled === true covers a user cancel, a duplicate tap and a pick
+      // whose activity result was lost — none of them should show an error.
+      if (result.canceled || !result.assets?.length) return;
 
-      if (result.assets && result.assets.length > 0) {
-        setIsLoading(true);
-        const asset = result.assets[0];
-        // Copy the picked file out of the evictable cache into app documents
-        // so a cache purge (or the system) can't remove it mid-processing.
-        const imported = await importToDocuments(asset.uri, asset.name);
-        // The cache/DocumentPicker copy is no longer needed.
-        try {
-          new fs.File(asset.uri).delete();
-        } catch {
-          // Ignore — the copy may already be gone or un-deletable.
-        }
-        setTempFile({
-          uri: imported.uri,
-          name: asset.name,
-          type: asset.mimeType?.startsWith("audio") ? "Audio" : "Video",
-        });
-        setIsLoading(false);
+      const asset = result.assets[0];
+      // Copy the picked file out of the evictable cache into app documents
+      // so a cache purge (or the system) can't remove it mid-processing.
+      const imported = await importToDocuments(asset.uri, asset.name);
+      // The cache/DocumentPicker copy is no longer needed.
+      try {
+        new fs.File(asset.uri).delete();
+      } catch {
+        // Ignore — the copy may already be gone or un-deletable.
       }
+      setTempFile({
+        uri: imported.uri,
+        name: asset.name,
+        type: asset.mimeType?.startsWith("audio") ? "Audio" : "Video",
+      });
     } catch (error) {
-      setIsLoading(false);
       console.error("Error importing file:", error);
       setError(error instanceof Error ? error : new Error(String(error)));
       setIsErrorModalVisible(true);
+    } finally {
+      importInFlightRef.current = false;
+      setIsLoading(false);
     }
   };
 
@@ -181,8 +189,14 @@ export default function HomeScreen() {
           {!tempFile ? (
             <View style={styles.actionsContainer}>
               <TouchableOpacity
-                style={[styles.actionCard, { borderColor: theme.COLORS.primary }]}
+                style={[
+                  styles.actionCard,
+                  { borderColor: theme.COLORS.primary },
+                  isLoading && { opacity: 0.55 },
+                ]}
                 onPress={handleImportFile}
+                disabled={isLoading}
+                activeOpacity={0.7}
               >
                 <View style={[styles.iconWrapper, { backgroundColor: "rgba(0, 229, 255, 0.1)" }]}>
                   <Feather

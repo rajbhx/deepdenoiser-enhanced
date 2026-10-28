@@ -77,6 +77,9 @@ jobs:
         # Catches the 6 strict-mode errors fixed in this commit (AUD-02).
         run: bunx tsc --noEmit
 
+      - name: Document picker regression tests
+        run: node tests/documentPicker.test.cjs
+
       - name: Expo Prebuild (Android only)
         run: bunx expo prebuild --platform android --clean --no-install
 
