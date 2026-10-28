@@ -84,14 +84,26 @@ jobs:
         run: bunx expo prebuild --platform android --clean --no-install
 
       - name: Tune Gradle memory
-        # :app:packageRelease OOMs on the default 2g heap when ZipFlinger
-        # buffers the 13MB .ort model plus RN/ONNX native libs. Duplicate keys
-        # in gradle.properties are last-wins, so this overrides Expo's default.
+        # :app:packageRelease OOMs on Expo's default 2g heap when ZipFlinger
+        # buffers the 13MB .ort model plus RN/ONNX native libs.
+        # NOTE: expo prebuild writes gradle.properties WITHOUT a trailing
+        # newline, so a plain `cat >>` glues the first line onto
+        # `ndkVersion=...` and breaks NDK parsing (CXX1103). Rewrite the two
+        # keys explicitly instead of appending.
         run: |
-          cat >> android/gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
-          org.gradle.workers.max=2
-          EOF
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/gradle.properties")
+          lines = [
+              line for line in p.read_text().splitlines()
+              if not line.startswith(("org.gradle.jvmargs=", "org.gradle.workers.max="))
+          ]
+          lines += [
+              "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8",
+              "org.gradle.workers.max=2",
+          ]
+          p.write_text("\n".join(lines) + "\n")
+          PY
 
       - name: Determine build command
         id: build
