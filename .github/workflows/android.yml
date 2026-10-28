@@ -129,6 +129,23 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
+      - name: Verify native picker patch is in the APK
+        # SDK 53+ links many Expo modules from a prebuilt AAR ([📦] in the
+        # autolinking log), which silently ignores patch-package changes to
+        # their Kotlin. buildFromSource opts this one module back into a
+        # source build. Fail the build if a later SDK upgrade undoes that.
+        run: |
+          APK=$(find android/app/build/outputs/apk -name '*.apk' | head -1)
+          test -n "$APK" || { echo "::error::No APK found"; exit 1; }
+          TMP=$(mktemp -d)
+          unzip -o -q "$APK" 'classes*.dex' -d "$TMP"
+          if strings "$TMP"/classes*.dex | grep -q cancelPendingPick; then
+            echo "OK: patched cancelPendingPick present in DEX"
+          else
+            echo "::error::cancelPendingPick missing from DEX - expo-document-picker was linked from the prebuilt AAR instead of the patched source."
+            exit 1
+          fi
+
       - name: Locate artifacts
         id: locate
         run: |

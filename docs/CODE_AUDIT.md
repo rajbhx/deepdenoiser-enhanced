@@ -67,6 +67,14 @@ Import button was not disabled while the picker was open.
   (d) always releases its own JS-side lock. `index.tsx` now uses it with a
   `useRef` double-tap guard and a disabled Import card.
 
+**Critical build detail.** Expo SDK 57 links `expo-document-picker` from a
+**precompiled AAR** (`[📦]` in the autolinking log), so patching `node_modules`
+Kotlin alone never reaches a release APK — verified by unpacking the built APK:
+the DEX had `getDocumentAsync` but no `cancelPendingPick`. `package.json` now
+sets `expo.autolinking.android.buildFromSource: ["expo-document-picker"]` and
+pins the package to `57.0.3`, so Gradle compiles the patched source. CI also
+greps the APK's DEX for `cancelPendingPick` and fails if it disappears.
+
 **Verification.** Strict `tsc --noEmit` (TS 6.0.3) clean on the new module;
 full-project check has 0 internal errors. `patch-package` applies the patch
 cleanly and idempotently. A 15-case Node harness simulated normal picks,
