@@ -891,15 +891,12 @@ class MediaProcessor(private val context: Context) : Closeable {
     /**
      * Auto threshold: 8 dB above the 25th percentile of the frame-RMS
      * distribution (a robust estimate of the quiet/noise floor), clamped into a
-     * speech-safe window.
+     * conservative window.
      *
-     * The clamp matters: speech RMS typically sits 15-30 dB BELOW the loudest
-     * frame, so any peak-relative cap (e.g. peak-15dB) lands inside the speech
-     * range and chops quiet passages — the root cause of "trim removed the
-     * first seconds of speech" reports. Instead we bound the threshold in
-     * absolute terms: it can never rise above -35 dBFS (quiet speech is
-     * protected) and never sink below -45 dBFS (denoised dead air, typically
-     * -60..-90 dBFS, is still caught).
+     * The clamp limits the threshold to -45..-35 dBFS instead of using a
+     * peak-relative cap, but it cannot guarantee that quiet speech or meaningful
+     * pauses will be preserved. Silence trimming is optional; keep the original
+     * and listen to the result.
      */
     private fun autoThresholdFromHistogram(histogram: IntArray, frameCount: Long): Double {
         if (frameCount <= 0) return -45.0
@@ -966,8 +963,8 @@ class MediaProcessor(private val context: Context) : Closeable {
 
     /**
      * Writes [segments] (absolute sample ranges, inclusive) back-to-back, skipping
-     * the removed pauses between them. When [trimmed], short linear fades smooth
-     * every cut point so joins never click.
+     * removed pauses. This multi-segment path can apply short linear fades, but
+     * not every outer cut is currently faded; see docs/AUDIT_2026-10-29.md.
      */
     private fun copyTrimmedSegments(
             input: InputStream,

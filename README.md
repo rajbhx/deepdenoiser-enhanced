@@ -2,9 +2,11 @@
 
 Offline AI audio and video denoising for Android using **DeepFilterNet3** and **ONNX Runtime**. This is a privacy-focused fork of [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser).
 
+**Current audit:** [2.0.4 audit and source cleanup](docs/AUDIT_2026-10-29.md) documents two open recording-recovery and optional silence-trim risks, device-test gaps and dependency findings. The cleanup does not create a new APK.
+
 ## Quality-preserving optimization (2.0.4 testing build)
 
-The application imports only the Feather icon family directly rather than pulling all vector-icon fonts through the package barrel. The frame path skips clearing fully overwritten input buffers and caches the unchanged float32 dry/wet coefficient; short and aliased frames retain their prior behavior. The bundled model, runtime provider defaults, output format, and signal-processing arithmetic are unchanged. Comparisons against the 2.0.3 source and bundled model are documented in [performance and target-device validation](docs/PERFORMANCE.md). The actual APK-size and OnePlus performance changes require measurement; this remains a debug-signed test build.
+The application imports only the Feather icon family directly rather than pulling all vector-icon fonts through the package barrel. The frame path skips clearing fully overwritten input buffers and caches the unchanged float32 dry/wet coefficient; short and aliased frames retain their prior behavior. The bundled model, runtime provider defaults, output format, and signal-processing arithmetic are unchanged. Comparisons against the 2.0.3 source and bundled model are documented in [performance and target-device validation](docs/PERFORMANCE.md). The verified 2.0.4 test APK is 2,232,412 bytes smaller than the 2.0.3 APK; OnePlus performance remains unmeasured. This remains a debug-signed test build.
 
 ## Product optimization (2.0.3 testing build)
 

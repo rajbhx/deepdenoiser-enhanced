@@ -6,14 +6,14 @@
  * which shortens the audio. `mode` picks how the silence threshold is decided:
  *  - "auto": the native analyzer estimates a threshold from the recording
  *    itself (8 dB above the 25th percentile of frame RMS, clamped into a
- *    speech-safe window of -45..-35 dBFS so quiet speech is never cut).
+ *    -45..-35 dBFS window). Quiet speech can still be cut; keep the original.
  *  - "manual": the user's `thresholdDb` is used verbatim.
  *
  * `minSilenceMs` decides HOW LONG a silence must be before it is removed.
  * Research on natural speech pauses (Goldman-Eisler 1972; Campione & Véronis
  * 2002; BYU/IDEA corpus) converges on ~500ms: pauses below that are normal
- * word/phrase rhythm and must be kept; longer ones are hesitations, thinking
- * pauses, or dead air and are safe to remove.
+ * word/phrase rhythm; longer pauses may be hesitations or dead air, but can
+ * also be meaningful and should be reviewed before removing them.
  */
 
 export interface SilenceTrimSettings {

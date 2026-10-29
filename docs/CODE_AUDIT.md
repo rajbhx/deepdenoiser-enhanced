@@ -1,5 +1,8 @@
 # DeepDenoiser 1.6 — Source Code Audit
 
+> Historical record, not a current findings list. For the 2.0.4 audit and
+> source-only cleanup, see [AUDIT_2026-10-29.md](AUDIT_2026-10-29.md).
+
 **Target:** `deepdenoiser-1.6-max.tar.gz` → `deepdenoiser-full/` (the file you linked from Drive)
 **Date:** 27 Oct 2026
 **Method:** full static read of all 98 files (~8,644 LOC of TS/TSX/JS/Kotlin), plus a real
