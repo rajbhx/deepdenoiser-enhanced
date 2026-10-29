@@ -1,4 +1,4 @@
-import { Feather } from "@expo/vector-icons";
+import Feather from "@expo/vector-icons/Feather";
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
@@ -7,6 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { getDenoiser } from "@/src/scripts/denoiserSingleton";
 import { initializeDiagnostics, installDiagnosticGlobalHandler, recordDiagnosticError } from "@/src/scripts/diagnostics";
 import DiagnosticBoundary from "@/src/components/DiagnosticBoundary";
+import { COLORS } from "@/src/constants/theme";
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -26,7 +27,7 @@ export default function RootLayout() {
   // Import uses Android's document picker. Microphone permission is requested
   // only when recording starts, and media permission only when saving. A user
   // who denies either can still use the rest of the app.
-  return <SafeAreaProvider><DiagnosticBoundary><Stack screenOptions={{ headerShown: false }} initialRouteName="(tabs)">
+  return <SafeAreaProvider><DiagnosticBoundary><Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: COLORS.background } }} initialRouteName="(tabs)">
     <Stack.Screen name="(tabs)" /><Stack.Screen name="processing" /><Stack.Screen name="recording" /><Stack.Screen name="history" /><Stack.Screen name="diagnostics" />
   </Stack></DiagnosticBoundary></SafeAreaProvider>;
 }

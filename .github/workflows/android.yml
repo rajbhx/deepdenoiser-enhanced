@@ -108,7 +108,7 @@ jobs:
       - name: Real bundled model regression (CPU)
         run: |
           npm install --prefix "$RUNNER_TEMP/dd-ort" --ignore-scripts --no-save --no-package-lock onnxruntime-node@1.24.3
-          NODE_PATH="$RUNNER_TEMP/dd-ort/node_modules" node tests/real-model.test.cjs
+          NODE_PATH="$RUNNER_TEMP/dd-ort/node_modules" bun run test:real-model
 
       - name: Expo Prebuild (Android only)
         run: bunx expo prebuild --platform android --clean --no-install

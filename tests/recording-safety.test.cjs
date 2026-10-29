@@ -53,6 +53,25 @@ function wav(samples, finalized=false){
   assert.equal(sizeLimit.enqueue(new Float32Array(11)),false);
   console.log('PASS live recording queue is bounded by both chunks and samples and stays prefix-only');
 
+  let release; const waiting=new Promise(resolve=>{release=resolve}), issues=[];
+  const observed=new safety.BoundedRecordingQueue(1,10,async()=>{await waiting},issue=>issues.push(issue));
+  assert.equal(observed.enqueue(new Float32Array(10)),true);
+  assert.deepEqual(observed.snapshot(),{pendingChunks:1,pendingSamples:10,overloaded:false,hasError:false});
+  assert.equal(observed.enqueue(new Float32Array(1)),false);
+  assert.deepEqual(issues,['overloaded']);
+  assert.equal(observed.snapshot().overloaded,true);release();await observed.drain();
+  assert.equal(observed.snapshot().pendingSamples,0);
+  const errors=[];
+  const failed=new safety.BoundedRecordingQueue(2,100,async()=>{throw new Error('synthetic live write failure')},issue=>errors.push(issue));
+  failed.enqueue(new Float32Array(10));await failed.drain();
+  assert.deepEqual(errors,['error']);assert.match(failed.error.message,/synthetic/);assert.equal(failed.snapshot().hasError,true);
+  failed.fail(new Error('second failure'));assert.deepEqual(errors,['error'],'notify only on the first failure');
+  let warned=0;const oldWarn=console.warn;console.warn=()=>{warned++};
+  const listenerFailure=new safety.BoundedRecordingQueue(1,2,async()=>{},()=>{throw new Error('broken UI')});
+  listenerFailure.enqueue(new Float32Array(2));assert.equal(listenerFailure.enqueue(new Float32Array(1)),false);await listenerFailure.drain();console.warn=oldWarn;
+  assert.equal(warned,1);assert.equal(listenerFailure.error,null,'a broken status observer must not fail the audio work');
+  console.log('PASS queue exposes bounded in-flight statistics and reports async failures without relying on the UI');
+
   const samples=Array.from({length:5009},(_,i)=>((i*311)%50000)-25000);
   const native=new File(root,'original.wav'),prefix=new File(root,'prefix.pcm');
   fs.writeFileSync(native.uri,wav(samples));

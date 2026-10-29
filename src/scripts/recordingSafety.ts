@@ -14,6 +14,15 @@ export function assertNativeRecorderIdle(): void {
   }
 }
 
+export type RecordingQueueIssue = "overloaded" | "error";
+export interface RecordingQueueSnapshot {
+  /** Includes the in-flight chunk; this is not end-to-end microphone latency. */
+  pendingChunks: number;
+  pendingSamples: number;
+  overloaded: boolean;
+  hasError: boolean;
+}
+
 /** Bounded, ordered live work. After overload, native recording remains the source of truth. */
 export class BoundedRecordingQueue {
   private chain: Promise<void> = Promise.resolve();
@@ -26,13 +35,32 @@ export class BoundedRecordingQueue {
     private readonly maxChunks: number,
     private readonly maxSamples: number,
     private readonly consume: (samples: Float32Array) => Promise<void>,
+    private readonly onIssue?: (issue: RecordingQueueIssue) => void,
   ) {}
+
+  /** Read-only approximate backlog for the interface, including in-flight work. */
+  snapshot(): RecordingQueueSnapshot {
+    return { pendingChunks: this.depth, pendingSamples: this.samples, overloaded: this.overloaded, hasError: !!this.error };
+  }
+
+  /** Report an asynchronous or stream-format failure without changing the fallback path. */
+  fail(error: unknown): void {
+    if (this.error) return;
+    this.error = error instanceof Error ? error : new Error(String(error));
+    this.notify("error");
+  }
+
+  private notify(issue: RecordingQueueIssue): void {
+    try { this.onIssue?.(issue); }
+    catch (error) { console.warn("Recording status observer failed:", error); }
+  }
 
   enqueue(input: Float32Array): boolean {
     if (this.overloaded || this.error) return false;
     if (this.depth >= this.maxChunks || this.samples + input.length > this.maxSamples) {
       // Stop accepting permanently: the accepted samples must be a prefix.
       this.overloaded = true;
+      this.notify("overloaded");
       return false;
     }
     const copy = new Float32Array(input);
@@ -41,7 +69,7 @@ export class BoundedRecordingQueue {
     this.chain = this.chain.then(async () => {
       if (this.error) return;
       try { await this.consume(copy); }
-      catch (error) { this.error = error instanceof Error ? error : new Error(String(error)); }
+      catch (error) { this.fail(error); }
     }).finally(() => {
       this.depth--;
       this.samples -= copy.length;

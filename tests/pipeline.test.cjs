@@ -27,7 +27,8 @@ const cache=new Directory(root,'cache'), output=new Directory(root,'output');
 fs.mkdirSync(p(cache));fs.mkdirSync(p(output));
 const filesystem={File,Directory,Paths:{cache,document:output}};
 const queue=load('batchQueue');
-let counter=0,began=0,ended=0,decodes=0,frames=0,cancelAt=Infinity,failDecode=false,shortRead=false,currentToken;
+let counter=0,began=0,ended=0,decodes=0,frames=0,cancelAt=Infinity,failDecode=false,shortRead=false,currentToken,lastChunkSize;
+const modelDestinations = new Set();
 const decoded=new Map(),denoised=new Map(),finals=new Map();
 const fileFor = map => async key => {const v=map.get(key);return v && v.file.exists?v:null;};
 const cacheApi={
@@ -46,7 +47,8 @@ const cacheApi={
 };
 const format={
   decodeToPCMFile:async(input,uri)=>{decodes++; const f=new File(uri); await fs.promises.copyFile(p(input),p(f)); if(failDecode)throw Error('decode failed'); return {file:f,sampleRate:48000};},
-  readPCMChunks:async(file,_chunkSize,onChunk)=>{
+  readPCMChunks:async(file,chunkSize,onChunk)=>{
+    lastChunkSize=chunkSize;
     const bytes=await fs.promises.readFile(p(file));
     const limit=shortRead?Math.max(0,bytes.length-2):bytes.length;
     for(let offset=0;offset<limit;offset+=1400){
@@ -66,6 +68,8 @@ const format={
 };
 const model={createStream:()=>({delay:new Float32Array(1536),pos:0}),processFrame:async(stream,input,dest,offset=0)=>{
   frames++; if(frames===cancelAt)currentToken.cancelled=true;
+  assert.ok(dest instanceof Float32Array, 'pipeline supplies reusable frame output');
+  modelDestinations.add(dest);
   const output=dest??new Float32Array(512);
   for(let i=0;i<input.length;i++){output[offset+i]=stream.delay[stream.pos];stream.delay[stream.pos]=input[i];stream.pos=(stream.pos+1)%stream.delay.length;}
   return output;
@@ -86,6 +90,8 @@ function inputFile(name,count){const file=new File(root,name), bytes=Buffer.allo
   const file=inputFile('one.pcm',5009), expected=fs.readFileSync(p(file)); currentToken={cancelled:false};
   const result=await pipeline.processMedia(file,'one.wav',false,settings,currentToken,()=>{});
   assert.equal(result.cached,false); assert.deepEqual(fs.readFileSync(p(result.file)),expected,'identity model must preserve samples and exact duration');
+  assert.equal(lastChunkSize, 48000 * 2, 'file reads are bounded to two seconds of source samples');
+  assert.equal(modelDestinations.size, 1, 'the frame output buffer is reused throughout one file');
   assert.equal(began,1);assert.equal(ended,1);assert.equal(decodes,1);
   const repeat=await pipeline.processMedia(file,'one.wav',false,settings,{cancelled:false},()=>{});
   assert.equal(repeat.cached,true);assert.equal(decodes,1);assert.equal(began,2);assert.equal(ended,2,'cache verification is protected and releases its run guard');

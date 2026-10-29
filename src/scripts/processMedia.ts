@@ -149,9 +149,9 @@ export async function processMedia(
       const targetRate = 48000;
       const hopSize = metadata.hop_size;
       const stream = denoiser.createStream(settings.attenLimDb);
-      const aligned = new AlignedDenoiseStream(hopSize, metadata.algorithmic_delay_samples, async frame => {
+      const aligned = new AlignedDenoiseStream(hopSize, metadata.algorithmic_delay_samples, async (frame, output) => {
         throwIfCancelled(token);
-        return denoiser.processFrame(stream, frame);
+        return denoiser.processFrame(stream, frame, output);
       });
       const staged = own(new fs.File(fs.Paths.cache, stagePcmPath("stage_dn")));
       denoisedPcmFile = staged;
@@ -164,7 +164,9 @@ export async function processMedia(
       };
       const modelStart = Date.now();
       progress("Removing noise...");
-      await readPCMChunks(pcmFile, sampleRate * 5, async (chunk, inputSamples) => {
+      // Bound working memory and update progress more frequently than the old
+      // five-second reads. Frame and resampler state continue across chunks.
+      await readPCMChunks(pcmFile, sampleRate * 2, async (chunk, inputSamples) => {
         throwIfCancelled(token);
         if (settings.normalize.toggle) for (let i = 0; i < chunk.length; i++) chunk[i] *= globalGain;
         await write(await aligned.push(chunk));

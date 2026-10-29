@@ -119,7 +119,7 @@ const pause = ms=>new Promise(resolve=>setTimeout(resolve,ms));
     open(){const uri=this.uri;return {offset:0,readBytes(count){const data=files.get(uri);return new Uint8Array(data.subarray(0,shortRead?data.length-1:count))},close(){}}}
     delete(){files.delete(this.uri)}
   }
-  const fakeModel={lastEngine:'cpu x4',async denoise(signal){modelCalls++;return badOutput?new Float32Array([NaN]):new Float32Array(signal)}};
+  const fakeModel={lastEngine:'cpu x4',lastOutputBufferMode:'reuse',async denoise(signal){modelCalls++;return badOutput?new Float32Array([NaN]):new Float32Array(signal)}};
   const fakeNative={
     fingerprintFile:async uri=>uri==='file:///model' ? {sha256:modelHashOk?'ec5ec24059035741763006dfaa6d463cfbbacf496caed5b5599ebe3477f2dd5b':'bad',bytes:1} : {sha256:hash(files.get(uri)),bytes:files.get(uri).length},
     pcmToWav:async(pcm,wav)=>{const data=files.get(pcm),header=Buffer.alloc(44);header.write('RIFF',0);header.write('WAVE',8);header.write('data',36);header.writeUInt32LE(data.length,40);files.set(wav,Buffer.concat([header,data]))},
@@ -132,6 +132,7 @@ const pause = ms=>new Promise(resolve=>setTimeout(resolve,ms));
   });
   let result=await self.runDiagnosticSelfCheck();
   assert.deepEqual(result.checks.map(c=>[c.id,c.status]),[['private-file','passed'],['wav','passed'],['model-hash','passed'],['model-run','passed']]);
+  assert.match(result.checks.find(c=>c.id==='model-run').detail,/Output buffers: verified reuse/);
   assert.equal(reserved,false);assert.equal(files.size,1);assert.equal(files.get('file:///cache/my-recording.wav').toString(),'keep user audio');
   shortRead=true;result=await self.runDiagnosticSelfCheck();shortRead=false;
   assert.equal(result.checks.find(c=>c.id==='private-file').status,'failed');assert.equal(result.checks.some(c=>c.id==='wav'),false);assert.equal(files.size,1);

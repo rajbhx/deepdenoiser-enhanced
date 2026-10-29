@@ -1,6 +1,6 @@
 import licensesData from "@/assets/generated/licenses.json";
 import * as theme from "@/src/constants/theme";
-import { Feather } from "@expo/vector-icons";
+import Feather from "@expo/vector-icons/Feather";
 import { Host, OutlinedTextField } from "@expo/ui/jetpack-compose";
 import * as Linking from "expo-linking";
 import { useRouter } from "expo-router";
