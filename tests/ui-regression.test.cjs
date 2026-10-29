@@ -201,8 +201,8 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   reset();const firstSave=deferred();const updates=[];S.updateSettings=patch=>{updates.push(patch);return updates.length===1?firstSave.promise:Promise.resolve({...defaultSettings(),...patch})};
   tree=await mount(Sidebar,{visible:true,onClose:()=>{}});await click(buttonByText(tree,'CPU'));let autos=tree.root.findAll(n=>n.type==='TouchableOpacity'&&allText(n).trim()==='Auto');assert.equal(autos[0].props.disabled,true);
   await click(autos[0]);assert.equal(updates.length,1,'settings controls cannot race while saving');
-  await act(async()=>firstSave.resolve({...defaultSettings(),runtime:'cpu'}));autos=tree.root.findAll(n=>n.type==='TouchableOpacity'&&allText(n).trim()==='Auto');await click(autos[0]);assert.deepEqual(updates.at(-1),{runtime:'auto'});assert.ok(buttonByText(tree,'About DeepDenoiser'));await unmount(tree);
-  console.log('PASS settings saving serializes taps and exposes About');
+  await act(async()=>firstSave.resolve({...defaultSettings(),runtime:'cpu'}));autos=tree.root.findAll(n=>n.type==='TouchableOpacity'&&allText(n).trim()==='Auto');await click(autos[0]);assert.deepEqual(updates.at(-1),{runtime:'auto'});assert.ok(buttonByText(tree,'About DeepDenoiser'));await click(byLabel(tree,'Open diagnostics'));assert.equal(S.routes.at(-1),'/diagnostics');await unmount(tree);
+  console.log('PASS settings saving serializes taps and exposes About and Diagnostics');
 
   reset();const saving=deferred();let saveCalls=0;S.save=()=>{saveCalls++;return saving.promise};const file=new FakeFile('file:///doc/denoised/out.wav');S.files.set(file.uri,{size:4});
   tree=await mount(Save,{file,label:'Save'});await click(buttonByText(tree,'Save'));assert.equal(buttonByText(tree,'Saving…').props.disabled,true);await click(buttonByText(tree,'Saving…'));assert.equal(saveCalls,1);
