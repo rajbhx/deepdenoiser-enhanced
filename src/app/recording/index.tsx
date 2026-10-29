@@ -11,7 +11,7 @@ import * as theme from "@/src/constants/theme";
 import { trackAppError, trackAppEvent } from "@/src/scripts/analytics";
 import type { DeepFilterNet } from "@/src/scripts/Denoiser";
 import { AlignedDenoiseStream } from "@/src/scripts/alignedDenoiseStream";
-import { BoundedRecordingQueue, ensureRecordingWavHeader, reconcileRecording, recordingsDir } from "@/src/scripts/recordingSafety";
+import { assertNativeRecorderIdle, BoundedRecordingQueue, ensureRecordingWavHeader, reconcileRecording, recordingsDir } from "@/src/scripts/recordingSafety";
 import { processMedia } from "@/src/scripts/processMedia";
 import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
 import { PCMtoWav, writePCMChunk } from "@/src/scripts/formatHandler";
@@ -85,6 +85,8 @@ export default function RecordingScreen() {
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isCatchingUp, setIsCatchingUp] = useState(false);
+  // A failed Stop may leave the native writer open even after the hook reports idle.
+  const [recorderUncertain, setRecorderUncertain] = useState(false);
   const [finalizingText, setFinalizingText] = useState("Finalizing Audio...");
   const [error, setError] = useState<Error | null>(null);
   const [isErrorModalVisible, setIsErrorModalVisible] = useState(false);
@@ -109,14 +111,15 @@ export default function RecordingScreen() {
   const runActiveRef = useRef(false);
   const isStoppingRef = useRef(false);
   const isStartingRef = useRef(false);
-  const isRecordingRef = useRef(isRecording);
+  const isRecordingRef = useRef(isRecording || isPaused);
+  const nativeStartedRef = useRef(false);
   const [pausedDuration, setPausedDuration] = useState(0);
   const animRef = useRef<Animated.CompositeAnimation | null>(null);
   const [pulseAnim] = useState(() => new Animated.Value(1));
 
   useEffect(() => {
-    isRecordingRef.current = isRecording;
-  }, [isRecording]);
+    isRecordingRef.current = isRecording || isPaused;
+  }, [isRecording, isPaused]);
 
   useEffect(() => {
     if (isPaused) {
@@ -144,7 +147,7 @@ export default function RecordingScreen() {
       // screen is nevertheless destroyed, the native file lives in the durable
       // recordings folder and can be recovered from History on next launch.
       acceptingStreamRef.current = false;
-      const stop = isRecordingRef.current ? stopAudioRecording() : Promise.resolve();
+      const stop = (isRecordingRef.current || nativeStartedRef.current) ? stopAudioRecording() : Promise.resolve();
       void stop.catch((err) => console.error("Failed to stop recording on unmount:", err))
         .then(() => queueRef.current?.drain())
         .catch((err) => console.error("Failed to drain recording queue:", err))
@@ -193,7 +196,7 @@ export default function RecordingScreen() {
   };
 
   const startRecording = async () => {
-    if (isStartingRef.current || isRecordingRef.current) return;
+    if (isStartingRef.current || isRecordingRef.current || recorderUncertain) return;
     isStartingRef.current = true;
     setIsStarting(true);
     try {
@@ -206,6 +209,7 @@ export default function RecordingScreen() {
         Alert.alert("Microphone permission needed", "Allow microphone access to record your voice. You can still import files without it.");
         return;
       }
+      assertNativeRecorderIdle();
       trackAppEvent("start_recording");
       // Initialize files
       const timestamp = Date.now();
@@ -259,10 +263,15 @@ export default function RecordingScreen() {
       };
 
       const started = await startAudioRecording(config);
+      nativeStartedRef.current = true;
       nativeRecordingRef.current = new fs.File(started.fileUri);
       isRecordingRef.current = true;
     } catch (error) {
       acceptingStreamRef.current = false;
+      if (nativeStartedRef.current) {
+        try { await stopAudioRecording(); nativeStartedRef.current = false; }
+        catch { setRecorderUncertain(true); }
+      }
       await queueRef.current?.drain();
       // An empty failed-start scratch file has no recoverable audio.
       for (const file of [originalPcmFileRef.current, denoisedPcmFileRef.current]) {
@@ -294,6 +303,7 @@ export default function RecordingScreen() {
       // this promise. The WAV reconciliation below also covers late callbacks.
       const stopped = await stopAudioRecording();
       nativeStopped = true;
+      nativeStartedRef.current = false;
       isRecordingRef.current = false;
       acceptingStreamRef.current = false;
       const queue = queueRef.current;
@@ -347,8 +357,9 @@ export default function RecordingScreen() {
       acceptingStreamRef.current = false;
       await queueRef.current?.drain();
       if (!nativeStopped) {
+        setRecorderUncertain(true);
         const cause = error instanceof Error ? error : new Error(String(error));
-        setError(new Error(`Could not stop the recorder. Try Stop again or restart the app; the native recording is kept for recovery in Your files. ${cause.message}`));
+        setError(new Error(`The recorder could not be finalized. The original is kept in Your files. If Stop continues to fail, force-stop the app in Android settings and reopen it before recovery. ${cause.message}`));
         setIsErrorModalVisible(true);
       } else {
         // A streamed prefix is only a partial emergency copy. The native file
@@ -391,7 +402,11 @@ export default function RecordingScreen() {
     }
   };
 
-  usePreventRemove(isRecording || isFinalizing || isStarting, () => {
+  usePreventRemove(isRecording || isPaused || isFinalizing || isStarting || recorderUncertain, () => {
+    if (recorderUncertain) {
+      Alert.alert("Recorder needs recovery", "Force-stop the app in Android settings, then reopen Your files. The original recording was kept.");
+      return;
+    }
     if (isFinalizing || isStarting) {
       Alert.alert("Please wait", "Your recording is being prepared or saved.");
       return;
@@ -471,7 +486,7 @@ export default function RecordingScreen() {
         ) : !finalOriginalWav ? (
           <View style={styles.controlsContainer}>
             <Text style={styles.statusText}>
-              {!isRecording && !isPaused
+              {recorderUncertain ? "Force-stop and reopen the app to recover your recording" : !isRecording && !isPaused
                 ? "Ready to record"
                 : isPaused
                   ? "Recording paused"
@@ -538,6 +553,7 @@ export default function RecordingScreen() {
                   { opacity: pressed ? 0.9 : 1 },
                 ]}
                 onPress={startRecording}
+                disabled={recorderUncertain}
                 android_ripple={{
                   color: "rgba(255, 255, 255, 0.2)",
                   borderless: true,
@@ -547,7 +563,7 @@ export default function RecordingScreen() {
                 <View style={styles.recordButtonInner}>
                   <Feather name="mic" size={40} color={theme.COLORS.white} />
                 </View>
-                <Text style={styles.buttonLabel}>Tap to Start</Text>
+                <Text style={styles.buttonLabel}>{recorderUncertain ? "Restart required" : "Tap to Start"}</Text>
               </Pressable>
             ) : (
               <View style={styles.activeControls}>

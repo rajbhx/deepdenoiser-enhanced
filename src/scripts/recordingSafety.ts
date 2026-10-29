@@ -1,4 +1,18 @@
 import * as fs from "expo-file-system";
+import { AudioStudioModule } from "@siteed/audio-studio";
+
+/** Fail closed before inspecting or modifying a recording after an uncertain Stop. */
+export function assertNativeRecorderIdle(): void {
+  let status: { isRecording?: boolean; isPaused?: boolean; isWriterActive?: boolean };
+  try { status = AudioStudioModule.status(); }
+  catch { throw new Error("Cannot confirm the recorder has stopped. Force-stop and reopen the app before recovery."); }
+  if (!status || typeof status.isWriterActive !== "boolean") {
+    throw new Error("Cannot confirm the recorder has stopped. Force-stop and reopen the app before recovery.");
+  }
+  if (status.isRecording || status.isPaused || status.isWriterActive) {
+    throw new Error("Wait until the recorder has stopped before accessing private files.");
+  }
+}
 
 /** Bounded, ordered live work. After overload, native recording remains the source of truth. */
 export class BoundedRecordingQueue {

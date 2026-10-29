@@ -34,6 +34,8 @@ bunx expo prebuild --platform android --clean --no-install
 cd android && ./gradlew assembleRelease
 ```
 
+If a previous hard-linked Bun cache causes a patch to fail, remove `node_modules` and reinstall using `--backend=copyfile --cache-dir` pointing to a new, empty directory.
+
 The workflow runs mock regressions, an actual bundled-model CPU test, and a Java atomic-write test; it also verifies native symbols and the signing certificate in the artifact. Without release secrets, the arm64 APK is named `testing-debug-signed` and is **not for production**. Local release builds without a key are unsigned; see [release signing](docs/RELEASE_SIGNING.md). Physical-device testing is still required before release; see [the 2.0 upgrade guide](docs/UPGRADE_2.0.md).
 
 To run the real-model regression separately on a compatible desktop:

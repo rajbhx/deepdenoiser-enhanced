@@ -23,12 +23,24 @@ function load(name, stubs={}) {
   mod.require=function(req){return Object.hasOwn(stubs,req)?stubs[req]:Module.prototype.require.call(this,req)};
   mod._compile(js,filename);return mod.exports;
 }
-const safety=load('recordingSafety',{'expo-file-system':{File,Directory,Paths:{document:{uri:root}}}});
+let recorderStatus={isRecording:false,isPaused:false,isWriterActive:false};
+const safety=load('recordingSafety',{'expo-file-system':{File,Directory,Paths:{document:{uri:root}}},
+  '@siteed/audio-studio':{AudioStudioModule:{status:()=>recorderStatus}}});
 const {AlignedDenoiseStream}=load('alignedDenoiseStream');
 function wav(samples, finalized=false){
   const b=Buffer.alloc(44+samples.length*2);b.write('RIFF',0);b.writeUInt32LE(finalized?b.length-8:0,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(48000,24);b.writeUInt32LE(96000,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(finalized?b.length-44:0,40);samples.forEach((v,i)=>b.writeInt16LE(v,44+i*2));return b;
 }
 (async()=>{
+  safety.assertNativeRecorderIdle();
+  for (const status of [
+    {isRecording:true,isPaused:false,isWriterActive:true},
+    {isRecording:false,isPaused:true,isWriterActive:true},
+    {isRecording:false,isPaused:false,isWriterActive:true},
+    {isRecording:false,isPaused:false},
+  ]) { recorderStatus=status; assert.throws(()=>safety.assertNativeRecorderIdle(),/recorder|confirm/i); }
+  recorderStatus={isRecording:false,isPaused:false,isWriterActive:false};
+  safety.assertNativeRecorderIdle();
+  console.log('PASS recording recovery fails closed for paused, active and timed-out native writers');
   let unblock;
   const gate=new Promise(resolve=>{unblock=resolve});const seen=[];
   const queue=new safety.BoundedRecordingQueue(100,1000,async samples=>{await gate;seen.push(samples[0])});

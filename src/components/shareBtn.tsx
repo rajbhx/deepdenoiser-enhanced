@@ -10,10 +10,12 @@ import {
 
 interface ShareBtnProps {
     uri: string;
+    beforeShare?: () => void;
 }
-const ShareBtn: React.FC<ShareBtnProps> = ({ uri }) => {
+const ShareBtn: React.FC<ShareBtnProps> = ({ uri, beforeShare }) => {
     const handleShare = async () => {
         try {
+            beforeShare?.();
             if (await Sharing.isAvailableAsync()) {
                 await Sharing.shareAsync(uri);
                 trackAppEvent("share_file");

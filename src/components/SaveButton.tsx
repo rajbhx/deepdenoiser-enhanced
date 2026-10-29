@@ -13,6 +13,7 @@ interface SaveButtonProps {
   style?: StyleProp<ViewStyle>;
   savedBg?: string;
   onError?: (error: Error) => void;
+  beforeSave?: () => void;
 }
 
 export default function SaveButton({
@@ -23,6 +24,7 @@ export default function SaveButton({
   style,
   savedBg,
   onError,
+  beforeSave,
 }: SaveButtonProps) {
   const [saved, setSaved] = useState(false);
   const saving = useRef(false);
@@ -37,6 +39,7 @@ export default function SaveButton({
     if (!file || saving.current) return;
     saving.current = true;
     try {
+      beforeSave?.();
       const success = await saveToDevice(file, albumName);
       if (!mounted.current) return;
       if (!success) {

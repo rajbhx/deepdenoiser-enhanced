@@ -4,41 +4,61 @@
      private var recordingThread: Thread? = null
 +    @Volatile private var recordingThreadError: Exception? = null
      private var recordingStartTime: Long = 0
-@@ -227,3 +228,3 @@
+@@ -100,2 +101,5 @@
+     private val audioRecordLock = Any()
++    // A separate short-held lock makes pause/resume atomic with non-blocking
++    // reads. Stop never takes this lock while joining the writer.
++    private val recordingReadLock = Any()
+     private var audioFileHandler: AudioFileHandler = AudioFileHandler(filesDir)
+@@ -227,3 +231,3 @@
                  }
 -                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                override fun reject(code: String?, message: String?, cause: Throwable?) {
                      LogUtils.e(CLASS_NAME, "🔄 Failed to reinitialize AudioRecord: $message")
-@@ -239,3 +240,3 @@
+@@ -239,3 +243,3 @@
                      }
 -                    override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                    override fun reject(code: String?, message: String?, cause: Throwable?) {}
                  })
-@@ -255,3 +256,3 @@
+@@ -255,3 +259,3 @@
                          }
 -                        override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                        override fun reject(code: String?, message: String?, cause: Throwable?) {}
                      })
-@@ -299,3 +300,3 @@
+@@ -299,3 +303,3 @@
                  }
 -                override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                override fun reject(code: String?, message: String?, cause: Throwable?) {}
              })
-@@ -419,3 +420,3 @@
+@@ -419,3 +423,3 @@
                              }
 -                            override fun reject(code: String, message: String?, cause: Throwable?) {
 +                            override fun reject(code: String?, message: String?, cause: Throwable?) {
                                  LogUtils.e(CLASS_NAME, "Failed to pause recording on phone call", cause)
-@@ -446,3 +447,3 @@
+@@ -446,3 +450,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording after phone call", cause)
-@@ -894,2 +895,3 @@
+@@ -894,2 +898,3 @@
              streamUuid = java.util.UUID.randomUUID().toString()
 +            recordingThreadError = null
              totalDataSize = 0
-@@ -1036,1 +1038,7 @@
+@@ -1013,11 +1018,3 @@
+-                if (isPaused.get()) {
+-                    val readStartTime = System.currentTimeMillis()
+-                    val remainingData = ByteArray(bufferSizeInBytes)
+-                    val bytesRead = audioRecord?.read(remainingData, 0, bufferSizeInBytes) ?: -1
+-                    if (bytesRead > 0) {
+-                        emitAudioData(remainingData.copyOfRange(0, bytesRead), bytesRead)
+-                        streamPosition += bytesRead  // Update stream position for final data
+-                    }
+-                }
+-
++                // Pause has already stopped AudioRecord. The writer owns the
++                // last captured samples and Stop joins it before finalizing.
+                 if (recordingConfig.showNotification) {
+@@ -1036,1 +1033,7 @@
                  recordingThread?.join(timeoutMs)
 +                if (recordingThread?.isAlive == true) {
 +                    // Do not claim a complete WAV while its writer is still open.
@@ -46,7 +66,7 @@
 +                    promise.reject("STOP_TIMEOUT", "Recording thread did not stop; the original file was kept", null)
 +                    return
 +                }
-@@ -1082,5 +1090,12 @@
+@@ -1082,5 +1085,12 @@
                  val cleanupStartTime = System.currentTimeMillis()
 +                val threadFailure = recordingThreadError
                  cleanup()
@@ -59,12 +79,103 @@
 +                promise.reject("RECORDING_FAILED", "Recording could not stop cleanly; the original file was kept", e)
 +                return
              } finally {
-@@ -1228,3 +1243,3 @@
+@@ -1228,3 +1238,3 @@
                      }
 -                    override fun reject(code: String, message: String?, cause: Throwable?) {
 +                    override fun reject(code: String?, message: String?, cause: Throwable?) {
                          LogUtils.e(CLASS_NAME, "⏺️ Failed to reinitialize AudioRecord: $message")
-@@ -1475,12 +1490,16 @@
+@@ -1247,20 +1257,14 @@
+             pausedDuration += System.currentTimeMillis() - lastPauseTime
+-            isPaused.set(false)
+-
++
+             synchronized(audioRecordLock) {
+-                // Double-check audioRecord is valid after potential reinitialization
+-                LogUtils.d(CLASS_NAME, "⏺️ Final check of audioRecord state: ${audioRecord?.state ?: "null"}")
+-                if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+-                    LogUtils.e(CLASS_NAME, "⏺️ AudioRecord is not properly initialized")
+-                    throw IllegalStateException("AudioRecord is not properly initialized")
+-                }
+-
+-                LogUtils.d(CLASS_NAME, "⏺️ Starting AudioRecord recording")
+-                audioRecord?.startRecording()
+-                LogUtils.d(CLASS_NAME, "⏺️ AudioRecord.startRecording called")
+-
+-                if (compressedRecorder != null) {
+-                    LogUtils.d(CLASS_NAME, "⏺️ Resuming compressed recorder")
+-                    compressedRecorder?.resume()
+-                    LogUtils.d(CLASS_NAME, "⏺️ Compressed recorder resumed")
++                synchronized(recordingReadLock) {
++                    // Do not let the worker read until AudioRecord has restarted.
++                    LogUtils.d(CLASS_NAME, "⏺️ Final check of audioRecord state: ${audioRecord?.state ?: "null"}")
++                    if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
++                        LogUtils.e(CLASS_NAME, "⏺️ AudioRecord is not properly initialized")
++                        throw IllegalStateException("AudioRecord is not properly initialized")
++                    }
++                    audioRecord?.startRecording()
++                    if (compressedRecorder != null) compressedRecorder?.resume()
++                    isPaused.set(false)
+                 }
+@@ -1287,22 +1291,22 @@
+     private fun pauseRecording(promise: Promise, isSystemInterruption: Boolean) {
+-        if (_isRecording.get() && !isPaused.get()) {
+-            audioRecord?.stop()
+-            compressedRecorder?.pause()
+-
+-            lastPauseTime = System.currentTimeMillis()
+-            isPaused.set(true)
+-            pausedBySystemInterruption.set(isSystemInterruption)
+-
+-            if (recordingConfig.showNotification) {
+-                notificationManager.pauseUpdates()
+-            }
+-
+-            releaseWakeLock()
+-            promise.resolve("Recording paused")
+-        } else {
+-            promise.reject(
+-                "NOT_RECORDING_OR_ALREADY_PAUSED",
+-                "Recording is either not active or already paused",
+-                null
+-            )
++        synchronized(recordingReadLock) {
++            if (_isRecording.get() && !isPaused.get()) {
++                try {
++                    // Mark paused before stopping so the worker cannot read a
++                    // stopped AudioRecord and misreport a normal pause as an error.
++                    isPaused.set(true)
++                    audioRecord?.stop()
++                    compressedRecorder?.pause()
++                    lastPauseTime = System.currentTimeMillis()
++                    pausedBySystemInterruption.set(isSystemInterruption)
++                    if (recordingConfig.showNotification) notificationManager.pauseUpdates()
++                    releaseWakeLock()
++                    promise.resolve("Recording paused")
++                } catch (e: Exception) {
++                    // Keep the worker paused when the recorder state is uncertain.
++                    promise.reject("PAUSE_FAILED", "Failed to pause recording: ${e.message}", e)
++                }
++            } else {
++                promise.reject("NOT_RECORDING_OR_ALREADY_PAUSED", "Recording is either not active or already paused", null)
++            }
+         }
+@@ -1320,3 +1324,5 @@
+-            // If service is running but we think we're not recording, clean up
+-            if (isServiceRunning && !_isRecording.get()) {
++            // After a Stop timeout the writer can outlive _isRecording. Never
++            // clean up or repair its WAV until the worker has actually exited.
++            val writerActive = recordingThread?.isAlive == true
++            if (isServiceRunning && !_isRecording.get() && !writerActive) {
+                 LogUtils.d(CLASS_NAME, "Detected orphaned recording service, cleaning up...")
+@@ -1331,2 +1337,3 @@
+                     "isPaused" to false,
++                    "isWriterActive" to writerActive,
+                     "mime" to mimeType,
+@@ -1380,2 +1387,3 @@
+                 "isPaused" to isPaused.get(),
++                "isWriterActive" to writerActive,
+                 "mimeType" to mimeType,
+@@ -1475,12 +1483,16 @@
                  val accumulatedAnalysisData = ByteArrayOutputStream()  // Separate buffer for analysis
 -                audioFileHandler.writeWavHeader(
 -                    accumulatedAudioData!!,
@@ -92,67 +203,69 @@
 +                        }
 +                    )
 +                }
-@@ -1519,16 +1538,19 @@
+@@ -1519,3 +1531,7 @@
 -                    val bytesRead = synchronized(audioRecordLock) {
 -                        audioRecord?.let {
--                            if (it.state != AudioRecord.STATE_INITIALIZED) {
--                                LogUtils.e(CLASS_NAME, "AudioRecord not initialized")
--                                return@let -1
-+                    // Stop joins this thread while holding audioRecordLock. Do not
-+                    // acquire that same lock here or Stop can time out before the
-+                    // writer closes. The read is non-blocking and Stop waits for it.
-+                    val bytesRead = audioRecord?.let {
-+                        if (it.state != AudioRecord.STATE_INITIALIZED) {
-+                            LogUtils.e(CLASS_NAME, "AudioRecord not initialized")
-+                            return@let -1
-+                        }
-+                        it.read(audioData, 0, bufferSizeInBytes, AudioRecord.READ_NON_BLOCKING).also { bytes ->
-+                            if (bytes < 0) {
-+                                LogUtils.e(CLASS_NAME, "AudioRecord read error: $bytes")
++                    // Stop joins this thread while holding audioRecordLock. The
++                    // distinct read lock prevents pause/resume races without
++                    // making Stop's join depend on that same lock.
++                    val bytesRead = synchronized(recordingReadLock) {
++                        if (isPaused.get() || !_isRecording.get()) 0
++                        else audioRecord?.let {
+                             if (it.state != AudioRecord.STATE_INITIALIZED) {
+@@ -1524,11 +1540,11 @@
                              }
 -                            // Use non-blocking read mode to allow quick thread exit
--                            it.read(audioData, 0, bufferSizeInBytes, AudioRecord.READ_NON_BLOCKING).also { bytes ->
+                             it.read(audioData, 0, bufferSizeInBytes, AudioRecord.READ_NON_BLOCKING).also { bytes ->
 -                                if (bytes < 0) {
 -                                    LogUtils.e(CLASS_NAME, "AudioRecord read error: $bytes")
 -                                }
--                            }
++                                if (bytes < 0) LogUtils.e(CLASS_NAME, "AudioRecord read error: $bytes")
+                             }
 -                        } ?: -1 // Handle null case
 -                    }
 -
-+                        }
-+                    } ?: -1
++                        } ?: -1
++                    }
 +
 +                    if (bytesRead < 0) {
 +                        throw IllegalStateException("AudioRecord read failed: $bytesRead")
 +                    }
                      if (bytesRead > 0) {
-@@ -1633,2 +1655,5 @@
+@@ -1633,2 +1649,5 @@
          } catch (e: Exception) {
 +            // Surface early read/write/close failures when Stop joins this worker.
 +            // Its partial WAV stays on disk for recovery; never report it complete.
 +            recordingThreadError = e
              // Ensure wake lock is released if the thread is interrupted
-@@ -1938,3 +1963,3 @@
+@@ -1794,3 +1813,4 @@
+-                // Update the WAV header if needed
+-                audioFile?.let { file ->
++                // A forced cleanup may race the writer. Leave the initial
++                // header for later recovery instead of modifying an open WAV.
++                if (recordingThread?.isAlive != true) audioFile?.let { file ->
+                     // Skip WAV header update if we're only doing compressed output
+@@ -1938,3 +1958,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to pause recording on audio focus loss")
-@@ -1961,3 +1986,3 @@
+@@ -1961,3 +1981,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording on audio focus gain")
-@@ -2008,3 +2033,3 @@
+@@ -2008,3 +2028,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to pause recording on audio focus loss")
-@@ -2035,3 +2060,3 @@
+@@ -2035,3 +2055,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording on audio focus gain")
-@@ -2141,3 +2166,3 @@
+@@ -2141,3 +2161,3 @@
                  override fun resolve(value: Any?) {}
 -                override fun reject(code: String, message: String?, cause: Throwable?) { 
 +                override fun reject(code: String?, message: String?, cause: Throwable?) { 

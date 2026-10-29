@@ -8,7 +8,7 @@ import { placeOutput } from "@/src/scripts/denoiseCache";
 import { PCMtoWav } from "@/src/scripts/formatHandler";
 import { mediaKind, type SelectedMedia } from "@/src/scripts/mediaSelection";
 import { listPrivateMedia, type PrivateMedia, type PrivateMediaGroup } from "@/src/scripts/privateMedia";
-import { ensureRecordingWavHeader } from "@/src/scripts/recordingSafety";
+import { assertNativeRecorderIdle, ensureRecordingWavHeader } from "@/src/scripts/recordingSafety";
 import Feather from "@expo/vector-icons/Feather";
 import { useRouter } from "expo-router";
 import { useFocusEffect } from "expo-router/react-navigation";
@@ -41,12 +41,19 @@ export default function HistoryScreen() {
   const visible = items.filter(item => item.group === group);
   const total = items.reduce((sum, item) => sum + item.size, 0);
 
+  const assertSafe = () => {
+    if (isProcessingMedia()) throw new Error("Wait until recording or processing is finished.");
+    assertNativeRecorderIdle();
+  };
+  const prepareFile = (item: PrivateMedia) => {
+    assertSafe();
+    if (item.group === "recordings" && !item.partial) ensureRecordingWavHeader(item.file);
+  };
   const open = (item: PrivateMedia) => {
     if (selected === item.file.uri) { setSelected(null); return; }
     try {
       if (item.group === "recordings" && !item.partial) {
-        if (isProcessingMedia()) throw new Error("Wait until the current recording or processing is finished.");
-        ensureRecordingWavHeader(item.file);
+        prepareFile(item);
       }
       setSelected(item.file.uri);
     } catch (error) {
@@ -58,7 +65,7 @@ export default function HistoryScreen() {
       { text: "Cancel", style: "cancel" },
       { text: "Delete", style: "destructive", onPress: () => {
         try {
-          if (isProcessingMedia()) throw new Error("Wait until recording or processing is finished before deleting files.");
+          assertSafe();
           setSelected(null);
           if (item.file.exists) item.file.delete();
           refresh();
@@ -72,7 +79,7 @@ export default function HistoryScreen() {
       { text: "Recover", onPress: () => {
         void (async () => {
           try {
-            if (isProcessingMedia()) throw new Error("Wait until recording or processing is finished.");
+            assertSafe();
             const wav = await PCMtoWav(item.file, 48000);
             await placeOutput(wav.file, `recovered_${Date.now()}_partial_original.wav`);
             setSelected(null); setGroup("results"); refresh();
@@ -82,11 +89,14 @@ export default function HistoryScreen() {
     ]);
   };
   const selectAsInput = (item: PrivateMedia) => {
-    const selection: SelectedMedia[] = [{ uri: item.file.uri, name: item.name, kind: mediaKind(item.name) }];
-    router.push({ pathname: "/processing/process", params: {
-      fileuri: encodeURIComponent(item.file.uri), filename: encodeURIComponent(item.name),
-      batch: encodeURIComponent(JSON.stringify(selection)),
-    } });
+    try {
+      prepareFile(item);
+      const selection: SelectedMedia[] = [{ uri: item.file.uri, name: item.name, kind: mediaKind(item.name) }];
+      router.push({ pathname: "/processing/process", params: {
+        fileuri: encodeURIComponent(item.file.uri), filename: encodeURIComponent(item.name),
+        batch: encodeURIComponent(JSON.stringify(selection)),
+      } });
+    } catch (error) { Alert.alert("Cannot use file", error instanceof Error ? error.message : String(error)); }
   };
 
   return <SafeAreaView style={theme.Styles.container}>
@@ -129,11 +139,11 @@ export default function HistoryScreen() {
                 <Feather name="refresh-cw" size={17} color={theme.COLORS.primary} /><Text style={styles.actionText}>Recover WAV</Text>
               </TouchableOpacity>}
               {canExport && <SaveButton file={item.file} label="Save" style={[theme.Styles.button, styles.save]}
-                onError={error => Alert.alert("Could not save", error.message)} />}
+                onError={error => Alert.alert("Could not save", error.message)} beforeSave={() => prepareFile(item)} />}
               {item.group !== "results" && !item.partial && <TouchableOpacity onPress={() => selectAsInput(item)} style={styles.action}>
                 <Feather name="zap" size={17} color={theme.COLORS.primary} /><Text style={styles.actionText}>Denoise</Text>
               </TouchableOpacity>}
-              {!item.partial && <ShareBtn uri={item.file.uri} />}
+              {!item.partial && <ShareBtn uri={item.file.uri} beforeShare={() => prepareFile(item)} />}
               <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Delete ${item.name}`} onPress={() => remove(item)} style={styles.delete}>
                 <Feather name="trash-2" size={20} color={theme.COLORS.error} />
               </TouchableOpacity>
