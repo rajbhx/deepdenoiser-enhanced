@@ -1,6 +1,7 @@
 import * as theme from "@/src/constants/theme";
 import ErrorModal from "@/src/components/ErrorModal";
 import { importToDocuments } from "@/src/scripts/denoiseCache";
+import { claimSharedFile, finishSharedFile } from "@/src/scripts/shareClaim";
 import { useRouter } from "expo-router";
 import { useIncomingShare } from "expo-sharing";
 import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
@@ -21,7 +22,10 @@ export default function ShareHandler() {
         const payload = resolvedSharedPayloads[0];
         // In expo-sharing SDK 55, payload has contentUri, originalName, contentType
         if (payload.contentUri) {
+          const claimedUri = payload.contentUri;
+          if (!claimSharedFile(claimedUri)) return;
           (async () => {
+            let success = false;
             try {
               // Copy the shared file out of its content:// grant into app
               // documents BEFORE navigating:
@@ -36,6 +40,8 @@ export default function ShareHandler() {
               );
               setIsCopying(false);
 
+              clearSharedPayloads();
+              success = true;
               router.replace({
                 pathname: "/processing/process",
                 params: {
@@ -44,8 +50,6 @@ export default function ShareHandler() {
                 },
               });
 
-              // Clear shared payloads to avoid reprocessing
-              clearSharedPayloads();
             } catch (copyErr) {
               setIsCopying(false);
               const err =
@@ -56,6 +60,8 @@ export default function ShareHandler() {
               setError(err);
               setIsErrorModalVisible(true);
               clearSharedPayloads();
+            } finally {
+              finishSharedFile(claimedUri, success);
             }
           })();
         } else {

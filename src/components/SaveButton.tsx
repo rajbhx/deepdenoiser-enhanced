@@ -1,6 +1,6 @@
 import Feather from "@expo/vector-icons/Feather";
 import * as fs from "expo-file-system";
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { StyleProp, StyleSheet, Text, TouchableOpacity, ViewStyle } from "react-native";
 import { saveToDevice } from "@/src/scripts/formatHandler";
 import * as theme from "@/src/constants/theme";
@@ -25,16 +25,30 @@ export default function SaveButton({
   onError,
 }: SaveButtonProps) {
   const [saved, setSaved] = useState(false);
+  const saving = useRef(false);
+  const mounted = useRef(true);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; if (timer.current) clearTimeout(timer.current); };
+  }, []);
 
   const handleSave = async () => {
-    if (!file) return;
-    const success = await saveToDevice(file, albumName);
-    if (!success) {
-      onError?.(new Error("Media library access is required to save files. Grant storage permission in Settings."));
-      return;
-    }
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    if (!file || saving.current) return;
+    saving.current = true;
+    try {
+      const success = await saveToDevice(file, albumName);
+      if (!mounted.current) return;
+      if (!success) {
+        onError?.(new Error("Could not save the file. Check media permissions and available storage."));
+        return;
+      }
+      setSaved(true);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setSaved(false), 2000);
+    } catch (error) {
+      if (mounted.current) onError?.(error instanceof Error ? error : new Error(String(error)));
+    } finally { saving.current = false; }
   };
 
   return (

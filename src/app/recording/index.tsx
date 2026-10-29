@@ -1,4 +1,7 @@
 import AudioPlayer from "@/src/components/audioPlayer";
+import CompareAudioPlayer from "@/src/components/CompareAudioPlayer";
+import metadata from "@/assets/model/model_metadata.json";
+import { placeOutput } from "@/src/scripts/denoiseCache";
 import CustomSlider from "@/src/components/customSlider";
 import ErrorModal from "@/src/components/ErrorModal";
 import SaveButton from "@/src/components/SaveButton";
@@ -26,6 +29,7 @@ import {
   useAudioRecorder,
 } from "@siteed/audio-studio";
 import * as fs from "expo-file-system";
+import { requestRecordingPermissionsAsync } from "expo-audio";
 import { useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -41,7 +45,8 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 const SAMPLE_RATE = 48000;
-const HOP_SIZE = 512;
+const HOP_SIZE = metadata.hop_size;
+const FFT_SIZE = metadata.fft_size;
 const ALSTEPS = [0, 5, 10, 15, 20, 30, 40];
 /** Mic emit interval (ms). 40ms = lower lag on OnePlus 7 when XNNPACK keeps up. */
 const STREAM_INTERVAL_MS = 40;
@@ -64,14 +69,6 @@ export default function RecordingScreen() {
 
   const [denoiserReady, setDenoiserReady] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      const s = await getSettings();
-      setAttenLimDb(s.attenLimDb);
-      setAttenPreset(s.attenPreset);
-    })();
-  }, []);
-
   // We use refs for files to ensure the callback has immediate access to them
   // without waiting for a re-render or being trapped in a stale closure.
   const originalPcmFileRef = useRef<fs.File | null>(null);
@@ -91,14 +88,25 @@ export default function RecordingScreen() {
   const [silenceTrim, setSilenceTrim] =
     useState<SilenceTrimSettings>(DEFAULT_SILENCE_TRIM);
 
+  useEffect(() => {
+    let active = true;
+    void getSettings().then((s) => {
+      if (active) { setAttenLimDb(s.attenLimDb); setAttenPreset(s.attenPreset); }
+    }).catch((err) => console.warn("Could not load recording settings:", err));
+    return () => { active = false; };
+  }, []);
+
   const denoiserRef = useRef<DeepFilterNet | null>(null);
   /** Per-recording recurrent state — never shared with the file pipeline. */
   const streamRef = useRef<StreamState | null>(null);
   const runActiveRef = useRef(false);
   const audioBufferRef = useRef<Float32Array>(new Float32Array(0));
+  const outputSkipRef = useRef(0);
+  const recordingErrorRef = useRef<Error | null>(null);
   const processingQueueRef = useRef<Promise<void>>(Promise.resolve());
   const queueDepthRef = useRef(0);
   const isStoppingRef = useRef(false);
+  const isStartingRef = useRef(false);
   const isRecordingRef = useRef(isRecording);
   const [pausedDuration, setPausedDuration] = useState(0);
   const isPausedRef = useRef(isPaused);
@@ -156,17 +164,15 @@ export default function RecordingScreen() {
       // be set so late stream events are dropped instead of appending to the
       // processing queue after the screen is gone.
       isStoppingRef.current = true;
-      if (runActiveRef.current) {
-        runActiveRef.current = false;
-        endRun();
-      }
-      if (isRecordingRef.current) {
-        stopAudioRecording()
-          .then(drainQueue)
-          .catch((err) =>
-            console.error("Failed to stop recording on unmount:", err),
-          );
-      }
+      // Keep the model session alive until queued inference has actually
+      // drained; releasing it first could race an active processFrame().
+      const stop = isRecordingRef.current ? stopAudioRecording() : Promise.resolve();
+      void stop.catch((err) => console.error("Failed to stop recording on unmount:", err))
+        .then(drainQueue)
+        .catch((err) => console.error("Failed to drain recording queue:", err))
+        .finally(() => {
+          if (runActiveRef.current) { runActiveRef.current = false; endRun(); }
+        });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only: stop on unmount
   }, []);
@@ -265,9 +271,13 @@ export default function RecordingScreen() {
                 }
               }
               wasPassthroughRef.current = passthrough;
-              // Wait for denoise file + original write together
+              // Match the file pipeline: prime by fftSize samples and discard
+              // the same amount from model output, preserving timeline length.
+              const skip = Math.min(outputSkipRef.current, denoisedOutput.length);
+              outputSkipRef.current -= skip;
+              const alignedOutput = denoisedOutput.subarray(skip);
               await Promise.all([
-                writePCMChunk(denFile, denoisedOutput, true),
+                alignedOutput.length ? writePCMChunk(denFile, alignedOutput, true) : Promise.resolve(),
                 origWrite,
               ]);
             } else {
@@ -280,6 +290,7 @@ export default function RecordingScreen() {
           }
         } catch (err) {
           console.error("Error in audio stream processing:", err);
+          recordingErrorRef.current ??= err instanceof Error ? err : new Error(String(err));
         }
       })
       .catch((err) => {
@@ -295,9 +306,16 @@ export default function RecordingScreen() {
   };
 
   const startRecording = async () => {
+    if (isStartingRef.current || isRecordingRef.current) return;
+    isStartingRef.current = true;
     try {
       if (!denoiserReady) {
         Alert.alert("Wait", "Denoiser is still initializing...");
+        return;
+      }
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert("Microphone permission needed", "Allow microphone access to record your voice. You can still import files without it.");
         return;
       }
       trackAppEvent("start_recording");
@@ -315,7 +333,9 @@ export default function RecordingScreen() {
       setFinalOriginalWav(null);
       setFinalDenoisedWav(null);
       isStoppingRef.current = false;
-      audioBufferRef.current = new Float32Array(0);
+      audioBufferRef.current = new Float32Array(FFT_SIZE);
+      outputSkipRef.current = FFT_SIZE;
+      recordingErrorRef.current = null;
       // Ensure any previous recording's queue has fully drained before
       // replacing the chain — otherwise old and new tasks would run
       // interleaved against the same shared model state.
@@ -324,8 +344,11 @@ export default function RecordingScreen() {
       passthroughModeRef.current = false;
       wasPassthroughRef.current = false;
 
-      // Reset denoiser states for new recording
-      streamRef.current = denoiserRef.current?.createStream(attenLimDb) ?? null;
+      // Reserve the shared session before obtaining it; a settings reset must
+      // not release it between stream creation and startAudioRecording().
+      if (!runActiveRef.current) { beginRun(); runActiveRef.current = true; }
+      denoiserRef.current = await getDenoiser();
+      streamRef.current = denoiserRef.current.createStream(attenLimDb);
 
       const config: RecordingConfig = {
         sampleRate: SAMPLE_RATE,
@@ -338,10 +361,6 @@ export default function RecordingScreen() {
         showNotification: false,
       };
 
-      if (!runActiveRef.current) {
-        beginRun();
-        runActiveRef.current = true;
-      }
       await startAudioRecording(config);
     } catch (error) {
       if (runActiveRef.current) {
@@ -352,20 +371,27 @@ export default function RecordingScreen() {
       trackAppError(err, { context: "startRecording" });
       setError(err);
       setIsErrorModalVisible(true);
+    } finally {
+      isStartingRef.current = false;
     }
   };
 
   const stopRecording = async () => {
+    if (isStoppingRef.current) return;
+    isStoppingRef.current = true;
+    let savedOriginal: fs.File | null = null;
     try {
       setIsFinalizing(true);
       isStoppingRef.current = true;
-      const result = await stopAudioRecording();
+      let stopError: unknown;
+      try { await stopAudioRecording(); } catch (err) { stopError = err; }
 
       // Wait for all background processing to finish. drainQueue re-checks
       // until the chain is stable — a stream event racing the stop can append
       // a chunk after we captured the promise, which would otherwise write
       // out of order.
       await drainQueue();
+      if (stopError) throw stopError;
 
       const origPcm = originalPcmFileRef.current;
       const denPcm = denoisedPcmFileRef.current;
@@ -379,16 +405,14 @@ export default function RecordingScreen() {
           const outBuf = new Float32Array(HOP_SIZE);
           const tailStream = streamRef.current;
           if (!tailStream) throw new Error("Denoise stream not initialized");
-          const outFrame = await denoiserRef.current.processFrame(
-            tailStream,
-            paddedFrame,
-            outBuf,
-          );
-          await writePCMChunk(
-            denPcm,
-            outFrame.subarray(0, leftovers.length),
-            true,
-          );
+          const outFrame = wasPassthroughRef.current
+            ? paddedFrame
+            : await denoiserRef.current.processFrame(tailStream, paddedFrame, outBuf);
+          let tail = outFrame.subarray(0, leftovers.length);
+          const skip = Math.min(outputSkipRef.current, tail.length);
+          outputSkipRef.current -= skip;
+          tail = tail.subarray(skip);
+          if (tail.length) await writePCMChunk(denPcm, tail, true);
           audioBufferRef.current = new Float32Array(0);
         }
 
@@ -397,10 +421,14 @@ export default function RecordingScreen() {
           throw new Error("PCM files missing after recording.");
         }
 
-        const origWav =
-          result && result.fileUri
-            ? new fs.File(result.fileUri)
-            : (await PCMtoWav(origPcm, SAMPLE_RATE)).file;
+        // Save the original first so it survives even if denoising/finalization fails.
+        const timestamp = Date.now();
+        const origWav = (await PCMtoWav(origPcm, SAMPLE_RATE)).file;
+        savedOriginal = await placeOutput(origWav, `recording_${timestamp}_original.wav`);
+        setFinalOriginalWav(savedOriginal);
+        if (recordingErrorRef.current) {
+          throw new Error(`Denoising failed; the original recording was kept. ${recordingErrorRef.current.message}`);
+        }
         // Trim is applied HERE, at finalization — only after the entire
         // recording has been denoised and the queue fully drained. It never
         // runs during recording, and only when the user explicitly enabled it
@@ -410,12 +438,20 @@ export default function RecordingScreen() {
           SAMPLE_RATE,
           silenceTrim.enabled ? silenceTrim : undefined,
         );
-        const denWav = denWavResult.file;
-
-        setFinalOriginalWav(origWav);
-        setFinalDenoisedWav(denWav);
+        const savedDenoised = await placeOutput(denWavResult.file, `recording_${timestamp}_cleaned.wav`);
+        setFinalDenoisedWav(savedDenoised);
       }
     } catch (error) {
+      // Best effort recovery of the raw recording if the model or native stop
+      // failed before the usual original-file commit.
+      const raw = originalPcmFileRef.current;
+      if (!savedOriginal && raw?.exists && raw.size > 0) {
+        try {
+          const wav = (await PCMtoWav(raw, SAMPLE_RATE)).file;
+          savedOriginal = await placeOutput(wav, `recording_${Date.now()}_original.wav`);
+          setFinalOriginalWav(savedOriginal);
+        } catch (recoveryError) { console.warn("Could not recover original recording:", recoveryError); }
+      }
       const err = error instanceof Error ? error : new Error(String(error));
       trackAppError(err, { context: "stopRecording" });
       setError(err);
@@ -427,6 +463,11 @@ export default function RecordingScreen() {
       }
       setIsFinalizing(false);
       isStoppingRef.current = false;
+      for (const file of [originalPcmFileRef.current, denoisedPcmFileRef.current]) {
+        // Preserve the raw scratch recording if even recovery failed.
+        if (file === originalPcmFileRef.current && !savedOriginal) continue;
+        try { if (file?.exists) file.delete(); } catch (err) { console.warn("Could not remove recording scratch file:", err); }
+      }
       originalPcmFileRef.current = null;
       denoisedPcmFileRef.current = null;
     }
@@ -442,7 +483,7 @@ export default function RecordingScreen() {
   useEffect(() => {
     if (!finalDenoisedWav) return;
     (async () => {
-      await incrementDenoiseCount();
+      await incrementDenoiseCount().catch((err) => console.warn("Could not update processing count:", err));
     })();
   }, [finalDenoisedWav]);
 
@@ -526,7 +567,8 @@ export default function RecordingScreen() {
                         onPress={async () => {
                           setAttenPreset(id);
                           setAttenLimDb(ATTEN_PRESET_DB[id]);
-                          await updateSettings({ attenPreset: id });
+                          try { await updateSettings({ attenPreset: id }); }
+                          catch (err) { setError(err instanceof Error ? err : new Error(String(err))); setIsErrorModalVisible(true); }
                         }}
                       >
                         <Text style={[styles.presetChipText, on && styles.presetChipTextOn]}>
@@ -542,7 +584,8 @@ export default function RecordingScreen() {
                   onValueChange={async (v) => {
                     setAttenLimDb(v);
                     setAttenPreset("custom");
-                    await updateSettings({ attenLimDb: v, attenPreset: "custom" });
+                    try { await updateSettings({ attenLimDb: v, attenPreset: "custom" }); }
+                    catch (err) { setError(err instanceof Error ? err : new Error(String(err))); setIsErrorModalVisible(true); }
                   }}
                   min={0}
                   max={40}
@@ -635,16 +678,18 @@ export default function RecordingScreen() {
                 />
                 <Text style={styles.resultTitle}>Original Audio</Text>
               </View>
-              <AudioPlayer
-                uri={finalOriginalWav.uri}
-                name="Original recording"
-              />
+              {finalDenoisedWav && !silenceTrim.enabled ? (
+                <CompareAudioPlayer key={`${finalOriginalWav.uri}|${finalDenoisedWav.uri}`}
+                  originalUri={finalOriginalWav.uri} cleanedUri={finalDenoisedWav.uri} />
+              ) : (
+                <AudioPlayer uri={finalOriginalWav.uri} name="Original recording" />
+              )}
               <View style={styles.resultActions}>
                 <SaveButton
                   file={finalOriginalWav}
                   label="Save Original"
                   savedLabel="Saved"
-                  albumName="DeepDenoiser/Recordings"
+                  albumName="DeepDenoiser Recordings"
                   style={[theme.Styles.button, styles.saveSubButton]}
                   onError={(err) => {
                     setError(err);
@@ -655,6 +700,7 @@ export default function RecordingScreen() {
               </View>
             </View>
 
+            {finalDenoisedWav && (
             <View
               style={[
                 styles.resultCard,
@@ -679,16 +725,19 @@ export default function RecordingScreen() {
                   Denoised Audio
                 </Text>
               </View>
-              <AudioPlayer
-                uri={finalDenoisedWav!.uri}
-                name="Denoised recording"
-              />
+              {silenceTrim.enabled ? (
+                <AudioPlayer uri={finalDenoisedWav.uri} name="Denoised recording" />
+              ) : (
+                <Text style={{ color: theme.COLORS.subtext, fontSize: 12 }}>
+                  Use the Original / Cleaned switch above to compare at the same position.
+                </Text>
+              )}
               <View style={styles.resultActions}>
                 <SaveButton
                   file={finalDenoisedWav}
                   label="Save Denoised"
                   savedLabel="Saved"
-                  albumName="DeepDenoiser/Recordings"
+                  albumName="DeepDenoiser Recordings"
                   style={[
                     theme.Styles.button,
                     styles.saveSubButton,
@@ -703,6 +752,7 @@ export default function RecordingScreen() {
                 <ShareBtn uri={finalDenoisedWav!.uri} />
               </View>
             </View>
+            )}
 
             <TouchableOpacity
               style={[theme.Styles.button, styles.newRecordButton]}

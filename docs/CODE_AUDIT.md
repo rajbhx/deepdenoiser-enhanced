@@ -10,6 +10,10 @@ runtime reproduction. Items marked *verify* need a device build to confirm.
 
 ---
 
+## Upgrade 2.0 status (29 Oct 2026)
+
+The 2.0 upgrade additionally addresses AUD-06/07/08/09/10/11/12/13/14/17/21/22/23/24/27/31 in code, and improves AUD-05 recording compensation (passthrough transitions still require device testing). See `UPGRADE_2.0.md` for exact behavior and limitations. The findings table and CSV below remain an **as-found historical audit**, not a live tracker. Automated tests are included, but none replace Android device tests.
+
 ## Fix status for this repository
 
 This commit applies the **P0 remediation set** from the audit below. The audit text is kept
@@ -29,7 +33,7 @@ verbatim as the "as-found" record; the findings listed here are resolved in this
 `setup-android@v3` action, adds a `bunx tsc --noEmit` gate, and raises the Gradle
 heap from 2g to 4g so `:app:packageRelease` does not OOM on the ONNX model.
 
-**Still open:** AUD-05 … AUD-40 (except the above). Nothing here has been run on a device —
+**Historical status immediately after the P0 patch:** AUD-05 … AUD-40 (except the above) were still open. Nothing in that P0 patch had been run on a device —
 the Kotlin changes in particular need an Android build + smoke test before release.
 
 ## Post-audit runtime fix — document picker (28 Oct 2026)
@@ -55,7 +59,7 @@ Import button was not disabled while the picker was open.
 
 **Fix (two layers).**
 
-- `patches/expo-document-picker+57.0.1.patch` (applied by the existing
+- `patches/expo-document-picker+57.0.3.patch` (applied by the existing
   `postinstall: patch-package`): clears `pendingPromise` if the launcher
   throws, always releases it via `finally` in `OnActivityResult`, and adds a
   zero-argument `cancelPendingPick()` escape hatch that settles a stale pick as
@@ -77,10 +81,10 @@ greps the APK's DEX for `cancelPendingPick` and fails if it disappears.
 
 **Verification.** Strict `tsc --noEmit` (TS 6.0.3) clean on the new module;
 full-project check has 0 internal errors. `patch-package` applies the patch
-cleanly and idempotently. A 15-case Node harness simulated normal picks,
+cleanly and idempotently. A 17-check Node harness simulated normal picks,
 double taps, lost activity results, an already-wedged module, and a resumed
-pick followed by a fresh tap — all passed. **Still needs a real Android
-device/build to confirm the Kotlin patch compiles and the flow feels right.**
+pick followed by a fresh tap — all passed. **The later CI build compiled the patch and verified it in APK DEX; real Android
+device testing is still required to confirm the runtime behavior.**
 
 > This was found in the field after the static audit; the 40-row
 > `CODE_AUDIT_FINDINGS.csv` tracker is unchanged.

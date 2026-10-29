@@ -22,6 +22,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -213,6 +214,39 @@ class MediaProcessor(private val context: Context) : Closeable {
                     } ?: throw Exception("Failed to open destination: $destPath")
                 } ?: throw Exception("Failed to open source: $sourcePath")
                 destPath
+            }
+
+    /**
+     * Stream the source into private storage while hashing its entire contents.
+     * This avoids loading large videos into JS memory and prevents two different
+     * files with the same name and size from sharing an import/cache identity.
+     */
+    suspend fun copyFileWithSha256(sourcePath: String, destPath: String): String =
+            withContext(Dispatchers.IO) {
+                val srcUri = getSafeUri(sourcePath)
+                val dstUri = getSafeUri(destPath)
+                val digest = MessageDigest.getInstance("SHA-256")
+                try {
+                    context.contentResolver.openInputStream(srcUri)?.use { input ->
+                        context.contentResolver.openOutputStream(dstUri)?.use { output ->
+                            val buffer = ByteArray(64 * 1024)
+                            var read: Int
+                            while (input.read(buffer).also { read = it } != -1) {
+                                if (read == 0) continue
+                                digest.update(buffer, 0, read)
+                                output.write(buffer, 0, read)
+                            }
+                        } ?: throw Exception("Failed to open destination: $destPath")
+                    } ?: throw Exception("Failed to open source: $sourcePath")
+                    digest.digest().joinToString("") { byte ->
+                        "%02x".format(byte.toInt() and 0xff)
+                    }
+                } catch (error: Exception) {
+                    if (dstUri.scheme == "file") {
+                        try { File(dstUri.path ?: "").delete() } catch (_: Exception) {}
+                    }
+                    throw error
+                }
             }
 
     // Returns the byte size of any readable URI (file:// or content://), or -1

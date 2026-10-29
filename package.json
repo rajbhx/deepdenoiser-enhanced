@@ -1,7 +1,7 @@
 {
   "name": "deepdenoiser",
   "main": "expo-router/entry",
-  "version": "1.6.0-enhanced",
+  "version": "2.0.0",
   "onnxruntimeExtensionsEnabled": "false",
   "scripts": {
     "start": "bunx expo start",
@@ -15,7 +15,8 @@
     "build:dev": "eas build -p android --profile development --local",
     "postinstall": "patch-package",
     "typecheck": "tsc --noEmit",
-    "test:document-picker": "node tests/documentPicker.test.cjs"
+    "test:document-picker": "node tests/documentPicker.test.cjs",
+    "test": "node tests/documentPicker.test.cjs && node tests/resampler.test.cjs && node tests/queue-and-compare.test.cjs && node tests/storage-and-processing.test.cjs && node tests/settings-and-model.test.cjs"
   },
   "dependencies": {
     "@expo/ui": "~57.0.11",

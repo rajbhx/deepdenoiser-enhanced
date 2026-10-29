@@ -1,450 +1,214 @@
 import AudioPlayer from "@/src/components/audioPlayer";
 import ErrorModal from "@/src/components/ErrorModal";
+import SettingsSidebar from "@/src/components/SettingsSidebar";
 import VideoPlayer from "@/src/components/videoPlayer";
 import * as theme from "@/src/constants/theme";
-import { importToDocuments, cleanupTempCache } from "@/src/scripts/denoiseCache";
+import { cleanupTempCache, importToDocuments } from "@/src/scripts/denoiseCache";
 import { pickDocument } from "@/src/scripts/documentPicker";
+import { MAX_BATCH_FILES, mediaKind, type SelectedMedia } from "@/src/scripts/mediaSelection";
+import { claimSharedFile, finishSharedFile } from "@/src/scripts/shareClaim";
 import Feather from "@expo/vector-icons/Feather";
-
+import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
 import * as fs from "expo-file-system";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { useIncomingShare } from "expo-sharing";
-import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
-import { Image } from "expo-image";
 import React, { useEffect, useRef, useState } from "react";
-import {
-  Alert,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from "react-native";
+import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import SettingsSidebar from "@/src/components/SettingsSidebar";
 
 export default function HomeScreen() {
   const router = useRouter();
-  const [tempFile, setTempFile] = useState<{
-    uri: string;
-    name: string;
-    type: "Audio" | "Video";
-  } | null>(null);
+  const [files, setFiles] = useState<SelectedMedia[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-
+  const [loadingLabel, setLoadingLabel] = useState("Preparing media…");
   const [error, setError] = useState<Error | null>(null);
   const [isErrorModalVisible, setIsErrorModalVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
-
-  // Defense-in-depth: handle share intents directly on the home screen so
-  // shares work even when the 150ms initial-URL routing timeout in Expo
-  // Router causes share-handler.tsx to never mount (R8/Proguard startup
-  // overhead in release builds).  share-handler.tsx remains as a fallback
-  // for when routing succeeds — clearSharedPayloads() prevents double-processing.
-  const {
-    resolvedSharedPayloads,
-    isResolving: isShareResolving,
-    clearSharedPayloads,
-    error: shareError,
-  } = useIncomingShare();
-  const shareHandledRef = useRef(false);
-  /** Synchronous double-tap guard (React state updates are async). */
   const importInFlightRef = useRef(false);
+  const { resolvedSharedPayloads, isResolving, clearSharedPayloads, error: shareError } = useIncomingShare();
 
   useEffect(() => {
-    if (shareHandledRef.current || isShareResolving) return;
-    if (resolvedSharedPayloads.length === 0 && !shareError) return;
-
-    if (shareError) {
-      console.error("Error resolving shared payload:", shareError);
-      shareHandledRef.current = true;
+    if (isResolving || !resolvedSharedPayloads.length) {
+      if (shareError) console.warn("Shared file could not be resolved:", shareError);
       return;
     }
-
     const payload = resolvedSharedPayloads[0];
-    if (!payload?.contentUri) {
-      shareHandledRef.current = true;
-      return;
-    }
-
-    shareHandledRef.current = true;
+    const uri = payload?.contentUri;
+    if (!uri || !claimSharedFile(uri)) return;
     (async () => {
+      let success = false;
       try {
-        setIsLoading(true);
-        const imported = await importToDocuments(
-          payload.contentUri!,
-          payload.originalName ?? "shared_file",
-          payload.value,
-        );
+        setLoadingLabel("Preparing shared file…"); setIsLoading(true);
+        const imported = await importToDocuments(uri, payload.originalName ?? "shared_file", payload.value);
         clearSharedPayloads();
-        router.push({
-          pathname: "/processing/process",
-          params: {
-            fileuri: encodeURIComponent(imported.uri),
-            filename: encodeURIComponent(payload.originalName ?? "shared_file"),
-          },
-        });
-      } catch (copyErr) {
-        setIsLoading(false);
-        const err =
-          copyErr instanceof Error ? copyErr : new Error(String(copyErr));
-        console.error("Failed to import shared file:", err);
-        setError(err);
+        success = true;
+        router.push({ pathname: "/processing/process", params: {
+          fileuri: encodeURIComponent(imported.uri),
+          filename: encodeURIComponent(payload.originalName ?? "shared_file"),
+        } });
+      } catch (copyError) {
+        clearSharedPayloads();
+        setError(copyError instanceof Error ? copyError : new Error(String(copyError)));
         setIsErrorModalVisible(true);
-        clearSharedPayloads();
+      } finally {
+        finishSharedFile(uri, success);
+        setIsLoading(false);
       }
     })();
-  }, [resolvedSharedPayloads, isShareResolving, shareError, clearSharedPayloads, router]);
+  }, [resolvedSharedPayloads, isResolving, shareError, clearSharedPayloads, router]);
 
-  useEffect(() => {
-    // Remove only this app's leftover temp PCM/encode artifacts.
-    // NEVER wipe the whole cache — that deleted the expo-document-picker
-    // working copy out from under users mid-flow (ENOENT crash reports).
-    cleanupTempCache();
-  }, []);
+  useEffect(() => { void cleanupTempCache(); }, []);
 
-  const handleImportFile = async () => {
-    // The native picker allows only one in-flight request. A ref guard is
-    // needed because a second tap can arrive before React re-renders with the
-    // isLoading flag; pickDocument() also serialises at module level.
+  const handleImportFiles = async () => {
     if (importInFlightRef.current) return;
     importInFlightRef.current = true;
-    setIsLoading(true);
+    setLoadingLabel("Opening file picker…"); setIsLoading(true);
+    const added: SelectedMedia[] = [];
     try {
-      const result = await pickDocument({
-        type: ["audio/*", "video/*"],
-        copyToCacheDirectory: true,
-      });
-
-      // canceled === true covers a user cancel, a duplicate tap and a pick
-      // whose activity result was lost — none of them should show an error.
+      const result = await pickDocument({ type: ["audio/*", "video/*"], copyToCacheDirectory: false, multiple: true });
       if (result.canceled || !result.assets?.length) return;
-
-      const asset = result.assets[0];
-      // Copy the picked file out of the evictable cache into app documents
-      // so a cache purge (or the system) can't remove it mid-processing.
-      const imported = await importToDocuments(asset.uri, asset.name);
-      // The cache/DocumentPicker copy is no longer needed.
-      try {
-        new fs.File(asset.uri).delete();
-      } catch {
-        // Ignore — the copy may already be gone or un-deletable.
+      if (files.length + result.assets.length > MAX_BATCH_FILES) {
+        Alert.alert("Too many files", `Select up to ${MAX_BATCH_FILES} files per batch.`);
+        return;
       }
-      setTempFile({
-        uri: imported.uri,
-        name: asset.name,
-        type: asset.mimeType?.startsWith("audio") ? "Audio" : "Video",
-      });
-    } catch (error) {
-      console.error("Error importing file:", error);
-      setError(error instanceof Error ? error : new Error(String(error)));
+      for (let i = 0; i < result.assets.length; i++) {
+        const asset = result.assets[i];
+        setLoadingLabel(`Importing ${i + 1} of ${result.assets.length}…`);
+        const imported = await importToDocuments(asset.uri, asset.name);
+        added.push({ uri: imported.uri, name: asset.name, kind: mediaKind(asset.name, asset.mimeType) });
+        // Only remove the picker-owned cache copy, never an arbitrary source URI.
+        if (asset.uri.startsWith(fs.Paths.cache.uri) && asset.uri !== imported.uri) {
+          try { const temp = new fs.File(asset.uri); if (temp.exists) temp.delete(); } catch { /* best effort */ }
+        }
+      }
+    } catch (importError) {
+      setError(importError instanceof Error ? importError : new Error(String(importError)));
       setIsErrorModalVisible(true);
     } finally {
+      if (added.length) {
+        setFiles((previous) => {
+          const seen = new Set(previous.map((item) => item.uri));
+          return [...previous, ...added.filter((item) => {
+            if (seen.has(item.uri)) return false;
+            seen.add(item.uri); return true;
+          })];
+        });
+      }
       importInFlightRef.current = false;
       setIsLoading(false);
     }
   };
 
-  const handleProceed = () => {
-    if (!tempFile) {
-      Alert.alert("No File", "Please import a file before proceeding.");
-      return;
-    }
-    router.push({
-      pathname: "/processing/process",
-      params: {
-        fileuri: encodeURIComponent(tempFile.uri),
-        filename: encodeURIComponent(tempFile.name),
-      },
-    });
+  const proceed = () => {
+    if (!files.length) return;
+    router.push({ pathname: "/processing/process", params: {
+      fileuri: encodeURIComponent(files[0].uri),
+      filename: encodeURIComponent(files[0].name),
+      batch: encodeURIComponent(JSON.stringify(files)),
+    } });
   };
 
   return (
     <SafeAreaView style={theme.Styles.container}>
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={theme.Styles.header}>
-          <Image
-            source={require("@/assets/images/splash-icon.png")}
-            style={styles.logo}
-          />
-          <View style={styles.titleRow}>
-            <Text style={theme.Styles.title}>DeepDenoiser</Text>
-            <TouchableOpacity
-              onPress={() => setSettingsVisible(true)}
-              hitSlop={12}
-              style={styles.gearBtn}
-            >
-              <Feather name="settings" size={22} color={theme.COLORS.text} />
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        <View style={styles.header}>
+          <View style={styles.brandRow}>
+            <Image source={require("@/assets/images/splash-icon.png")} style={styles.logo} />
+            <View style={styles.brandText}>
+              <Text style={styles.eyebrow}>PRIVATE · ON-DEVICE AI</Text>
+              <Text style={styles.title}>DeepDenoiser</Text>
+            </View>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open settings" onPress={() => setSettingsVisible(true)} style={styles.settings}>
+              <Feather name="settings" size={21} color={theme.COLORS.text} />
             </TouchableOpacity>
           </View>
-          <Text style={theme.Styles.subtitle}>
-            Offline noise removal · Import or record
-          </Text>
+          <Text style={styles.subtitle}>Cleaner audio, wherever you are.</Text>
         </View>
 
-        <View style={styles.mainContent}>
-          {!tempFile ? (
-            <View style={styles.actionsContainer}>
-              <TouchableOpacity
-                style={[
-                  styles.actionCard,
-                  { borderColor: theme.COLORS.primary },
-                  isLoading && { opacity: 0.55 },
-                ]}
-                onPress={handleImportFile}
-                disabled={isLoading}
-                activeOpacity={0.7}
-              >
-                <View style={[styles.iconWrapper, { backgroundColor: "rgba(0, 229, 255, 0.1)" }]}>
-                  <Feather
-                    name="upload-cloud"
-                    size={32}
-                    color={theme.COLORS.primary}
-                  />
-                </View>
-                <View style={styles.actionTextContainer}>
-                  <Text style={styles.actionTitle}>Import File</Text>
-                  <Text style={styles.actionSubtitle}>
-                    Pick audio or video
-                  </Text>
-                </View>
-                <Feather name="chevron-right" size={20} color={theme.COLORS.border} />
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.actionCard, { borderColor: theme.COLORS.error }]}
-                onPress={() => router.push("/recording")}
-              >
-                <View style={[styles.iconWrapper, { backgroundColor: "rgba(255, 61, 0, 0.1)" }]}>
-                  <Feather
-                    name="mic"
-                    size={32}
-                    color={theme.COLORS.error}
-                  />
-                </View>
-                <View style={styles.actionTextContainer}>
-                  <Text style={[styles.actionTitle, { color: theme.COLORS.error }]}>Record Voice</Text>
-                  <Text style={styles.actionSubtitle}>
-                    Live denoise while you speak
-                  </Text>
-                </View>
-                <Feather name="chevron-right" size={20} color={theme.COLORS.border} />
-              </TouchableOpacity>
-
-              {/* <View style={styles.infoBox}>
-                <Feather name="info" size={16} color={theme.COLORS.primary} style={{ marginRight: 10 }} />
-                <Text style={styles.infoText}>
-                  Uses DeepFilterNet 3 model for high-quality background noise removal.
-                </Text>
-              </View> */}
-            </View>
-          ) : (
-            <View style={styles.previewContainer}>
-              <View style={styles.previewHeader}>
-                <Text style={styles.previewTitle}>Selected File</Text>
-                <TouchableOpacity
-                  onPress={() => setTempFile(null)}
-                  style={styles.removeBadge}
-                >
-                  <Feather name="x" size={14} color={theme.COLORS.white} />
-                  <Text style={styles.removeBadgeText}>Remove</Text>
-                </TouchableOpacity>
+        {!files.length ? (
+          <View style={styles.actions}>
+            <TouchableOpacity accessibilityRole="button" style={[styles.heroCard, isLoading && styles.dim]} onPress={handleImportFiles} disabled={isLoading} activeOpacity={0.8}>
+              <View style={styles.heroTop}>
+                <View style={styles.heroIcon}><Feather name="upload-cloud" size={27} color={theme.COLORS.primary} /></View>
+                <Feather name="arrow-up-right" size={20} color={theme.COLORS.primary} />
               </View>
-
-              <View style={styles.fileDetails}>
-                {tempFile.type === "Video" ? (
-                  <VideoPlayer uri={tempFile.uri} name={tempFile.name} />
-                ) : (
-                  <View style={theme.Styles.card}>
-                    <AudioPlayer uri={tempFile.uri} name={tempFile.name} />
-                  </View>
-                )}
+              <Text style={styles.heroTitle}>Import media</Text>
+              <Text style={styles.heroSubtitle}>Select audio or video. Choose multiple files for a batch.</Text>
+              <View style={styles.tagRow}><Text style={styles.tag}>AUDIO</Text><Text style={styles.tag}>VIDEO</Text><Text style={styles.tag}>BATCH</Text></View>
+            </TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" style={styles.recordCard} onPress={() => router.push("/recording")} disabled={isLoading}>
+              <View style={styles.recordIcon}><Feather name="mic" size={23} color={theme.COLORS.error} /></View>
+              <View style={{ flex: 1 }}><Text style={styles.actionTitle}>Record voice</Text><Text style={styles.actionSubtitle}>Denoise while you speak</Text></View>
+              <Feather name="chevron-right" size={20} color={theme.COLORS.subtext} />
+            </TouchableOpacity>
+            <View style={styles.privacy}><Feather name="shield" size={16} color={theme.COLORS.success} /><Text style={styles.privacyText}>Your files stay on your device.</Text></View>
+          </View>
+        ) : (
+          <View style={styles.selection}>
+            <View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>Selected media</Text><Text style={styles.actionSubtitle}>{files.length} of {MAX_BATCH_FILES} files · processed one at a time</Text></View>
+              <TouchableOpacity onPress={() => setFiles([])} disabled={isLoading}><Text style={styles.clear}>Clear all</Text></TouchableOpacity></View>
+            {files.map((file, index) => (
+              <View style={styles.fileRow} key={`${file.uri}-${index}`}>
+                <View style={styles.fileIcon}><Feather name={file.kind === "video" ? "film" : "music"} size={18} color={theme.COLORS.primary} /></View>
+                <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.fileName}>{file.name}</Text><Text style={styles.fileType}>{file.kind.toUpperCase()} · {index + 1} / {files.length}</Text></View>
+                <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Remove ${file.name}`} disabled={isLoading} onPress={() => setFiles((items) => items.filter((_, i) => i !== index))} style={styles.remove}><Feather name="x" size={18} color={theme.COLORS.subtext} /></TouchableOpacity>
               </View>
-            </View>
-          )}
-
-          {isLoading && (
-            <View style={styles.loaderContainer}>
-              <Host matchContents colorScheme="dark">
-                <LoadingIndicator color={theme.COLORS.primary} />
-              </Host>
-              <Text style={styles.loaderText}>Processing asset...</Text>
-            </View>
-          )}
-        </View>
+            ))}
+            <TouchableOpacity style={styles.addMore} onPress={handleImportFiles} disabled={isLoading || files.length >= MAX_BATCH_FILES}>
+              <Feather name="plus" size={16} color={theme.COLORS.primary} /><Text style={styles.addMoreText}>Add more files</Text>
+            </TouchableOpacity>
+            {files.length === 1 && !isLoading && <View style={styles.preview}>
+              <Text style={styles.previewLabel}>PREVIEW</Text>
+              {files[0].kind === "video" ? <VideoPlayer uri={files[0].uri} name={files[0].name} /> : <AudioPlayer uri={files[0].uri} name={files[0].name} />}
+            </View>}
+          </View>
+        )}
+        {isLoading && <View style={styles.loading}><Host matchContents colorScheme="dark"><LoadingIndicator color={theme.COLORS.primary} /></Host><Text style={styles.loadingText}>{loadingLabel}</Text></View>}
       </ScrollView>
-
-      <View style={styles.footer}>
-        <TouchableOpacity
-          style={[
-            theme.Styles.button,
-            !tempFile && theme.Styles.disabledButton,
-            { width: "100%" },
-          ]}
-          onPress={handleProceed}
-          disabled={!tempFile || isLoading}
-        >
-          <Text style={theme.Styles.buttonText}>Proceed to Denoise</Text>
-          <Feather
-            name="arrow-right"
-            size={20}
-            color={theme.COLORS.background}
-            style={{ marginLeft: 8 }}
-          />
-        </TouchableOpacity>
-      </View>
-
-      <SettingsSidebar
-        visible={settingsVisible}
-        onClose={() => setSettingsVisible(false)}
-      />
-      <ErrorModal
-        visible={isErrorModalVisible}
-        error={error}
-        onClose={() => setIsErrorModalVisible(false)}
-      />
+      {!!files.length && <View style={styles.footer}><TouchableOpacity style={[theme.Styles.button, isLoading && theme.Styles.disabledButton]} onPress={proceed} disabled={isLoading}>
+        <Text style={theme.Styles.buttonText}>{files.length === 1 ? "Continue" : `Continue with ${files.length} files`}</Text><Feather name="arrow-right" size={20} color={theme.COLORS.background} style={{ marginLeft: 8 }} />
+      </TouchableOpacity></View>}
+      <SettingsSidebar visible={settingsVisible} onClose={() => setSettingsVisible(false)} />
+      <ErrorModal visible={isErrorModalVisible} error={error} onClose={() => setIsErrorModalVisible(false)} />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  titleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    width: "100%",
-    paddingHorizontal: 8,
-  },
-  gearBtn: {
-    position: "absolute",
-    right: 0,
-    padding: 8,
-  },
-
-  scrollContent: {
-    flexGrow: 1,
-    paddingBottom: theme.SPACING.xxlarge,
-  },
-  logoContainer: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-  },
-  logo: {
-    width: 60,
-    height: 60,
-  },
-  mainContent: {
-    flex: 1,
-    marginTop: theme.SPACING.medium,
-  },
-  actionsContainer: {
-    gap: 16,
-  },
-  actionCard: {
-    backgroundColor: theme.COLORS.surface,
-    borderRadius: 20,
-    padding: 20,
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderStyle: "dashed",
-  },
-  iconWrapper: {
-    width: 64,
-    height: 64,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 16,
-  },
-  actionTextContainer: {
-    flex: 1,
-  },
-  actionTitle: {
-    color: theme.COLORS.text,
-    fontSize: theme.FONT_SIZE.heading,
-    fontWeight: "800",
-    marginBottom: 4,
-  },
-  actionSubtitle: {
-    color: theme.COLORS.subtext,
-    fontSize: theme.FONT_SIZE.small,
-    fontWeight: "500",
-  },
-  infoBox: {
-    flexDirection: "row",
-    backgroundColor: "rgba(0, 229, 255, 0.05)",
-    padding: 16,
-    borderRadius: 16,
-    marginTop: 10,
-    alignItems: "center",
-  },
-  infoText: {
-    color: theme.COLORS.subtext,
-    fontSize: theme.FONT_SIZE.xsmall,
-    flex: 1,
-    lineHeight: 18,
-  },
-  previewContainer: {
-    width: "100%",
-  },
-  previewHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  previewTitle: {
-    color: theme.COLORS.text,
-    fontSize: theme.FONT_SIZE.body,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 1,
-  },
-  removeBadge: {
-    flexDirection: "row",
-    backgroundColor: theme.COLORS.error,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    alignItems: "center",
-    gap: 4,
-  },
-  removeBadgeText: {
-    color: theme.COLORS.white,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  fileDetails: {
-    width: "100%",
-  },
-  loaderContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 40,
-  },
-  loaderText: {
-    color: theme.COLORS.subtext,
-    marginTop: 12,
-    fontSize: theme.FONT_SIZE.small,
-  },
-  footer: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    padding: theme.SPACING.medium,
-    paddingBottom: theme.SPACING.xlarge,
-    backgroundColor: theme.COLORS.background,
-  },
+  scroll: { flexGrow: 1, paddingBottom: 130 },
+  header: { marginTop: 26, marginBottom: 28 },
+  brandRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  logo: { width: 52, height: 52 }, brandText: { flex: 1 },
+  eyebrow: { color: theme.COLORS.primary, fontSize: 10, fontWeight: "800", letterSpacing: 1.2, marginBottom: 4 },
+  title: { color: theme.COLORS.text, fontSize: 27, fontWeight: "800", letterSpacing: -0.8 },
+  subtitle: { color: theme.COLORS.subtext, marginTop: 15, fontSize: 15 },
+  settings: { width: 43, height: 43, backgroundColor: theme.COLORS.surface, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: theme.COLORS.border },
+  actions: { gap: 14 },
+  heroCard: { backgroundColor: "#153044", borderRadius: 24, padding: 22, borderWidth: 1, borderColor: "#24516A", gap: 10 },
+  heroTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 },
+  heroIcon: { width: 52, height: 52, borderRadius: 16, backgroundColor: "rgba(0,229,255,0.12)", alignItems: "center", justifyContent: "center" },
+  heroTitle: { color: theme.COLORS.text, fontSize: 22, fontWeight: "800" },
+  heroSubtitle: { color: "#B7CFDA", fontSize: 14, lineHeight: 21 },
+  tagRow: { flexDirection: "row", gap: 8, marginTop: 6 },
+  tag: { color: theme.COLORS.primary, fontSize: 10, fontWeight: "800", letterSpacing: 0.6, backgroundColor: "rgba(0,229,255,0.1)", paddingHorizontal: 9, paddingVertical: 5, borderRadius: 8 },
+  recordCard: { backgroundColor: theme.COLORS.surface, borderRadius: 20, padding: 18, flexDirection: "row", alignItems: "center", gap: 14, borderWidth: 1, borderColor: theme.COLORS.border },
+  recordIcon: { width: 48, height: 48, borderRadius: 14, backgroundColor: "rgba(239,68,68,0.12)", alignItems: "center", justifyContent: "center" },
+  actionTitle: { color: theme.COLORS.text, fontSize: 16, fontWeight: "800" },
+  actionSubtitle: { color: theme.COLORS.subtext, fontSize: 12, marginTop: 4 },
+  privacy: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 10 },
+  privacyText: { color: theme.COLORS.subtext, fontSize: 12 },
+  selection: { gap: 10 },
+  sectionHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  sectionTitle: { color: theme.COLORS.text, fontSize: 19, fontWeight: "800" }, clear: { color: theme.COLORS.primary, fontSize: 13, fontWeight: "700" },
+  fileRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: theme.COLORS.surface, borderWidth: 1, borderColor: theme.COLORS.border, padding: 12, borderRadius: 16 },
+  fileIcon: { width: 42, height: 42, borderRadius: 12, backgroundColor: "rgba(0,229,255,0.09)", alignItems: "center", justifyContent: "center" },
+  fileName: { color: theme.COLORS.text, fontSize: 14, fontWeight: "700" }, fileType: { color: theme.COLORS.subtext, fontSize: 10, fontWeight: "700", marginTop: 4, letterSpacing: 0.6 },
+  remove: { padding: 8 },
+  addMore: { flexDirection: "row", justifyContent: "center", alignItems: "center", gap: 6, padding: 14, borderWidth: 1, borderStyle: "dashed", borderColor: theme.COLORS.border, borderRadius: 14 },
+  addMoreText: { color: theme.COLORS.primary, fontWeight: "700", fontSize: 13 },
+  preview: { backgroundColor: theme.COLORS.surface, borderRadius: 20, padding: 16, marginTop: 8 }, previewLabel: { color: theme.COLORS.subtext, fontSize: 10, fontWeight: "800", letterSpacing: 1, marginBottom: 10 },
+  loading: { alignItems: "center", gap: 10, marginTop: 24 }, loadingText: { color: theme.COLORS.subtext, fontSize: 13 },
+  footer: { position: "absolute", bottom: 0, left: 0, right: 0, padding: 16, backgroundColor: theme.COLORS.background },
+  dim: { opacity: 0.55 },
 });

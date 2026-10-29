@@ -114,6 +114,20 @@ class AudioProcessorModule : Module() {
             }
         }
 
+        AsyncFunction("copyFileWithSha256") {
+                sourceUri: String,
+                destUri: String,
+                promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val digest = newProcessor().use { it.copyFileWithSha256(sourceUri, destUri) }
+                    promise.resolve(digest)
+                } catch (e: Exception) {
+                    promise.reject("ERR_COPY_HASH", e.message ?: e.toString(), e)
+                }
+            }
+        }
+
         AsyncFunction("getFileSize") {
                 path: String,
                 promise: Promise ->

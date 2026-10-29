@@ -3,44 +3,36 @@ import { DeepFilterNet } from "./Denoiser";
 import { getSettings, resolveCoreLevel, type RuntimeMode } from "./settings";
 
 let instance: DeepFilterNet | null = null;
-let loadPromise: Promise<DeepFilterNet> | null = null;
 let loadedKey: string | null = null;
-
-/**
- * Number of in-flight pipelines using the shared session. SettingsSidebar
- * calls resetDenoiser() on runtime/core changes; releasing the session under
- * an active session.run() used to free native memory mid-inference (AUD-01).
- */
 let activeRuns = 0;
 let pendingReset = false;
+let operations: Promise<void> = Promise.resolve();
 
-export function beginRun(): void {
-  activeRuns++;
+/** Serialize loading/releasing; a failed load must not poison the queue. */
+function exclusive<T>(operation: () => Promise<T>): Promise<T> {
+  const result = operations.then(operation, operation);
+  operations = result.then(() => undefined, () => undefined);
+  return result;
 }
 
+export function beginRun(): void { activeRuns++; }
 export function endRun(): void {
   activeRuns = Math.max(0, activeRuns - 1);
-  if (activeRuns === 0 && pendingReset) {
+  if (activeRuns === 0 && pendingReset) void resetDenoiser();
+}
+export function getEngineLabel(): string { return instance?.lastEngine ?? "not-loaded"; }
+
+export function resetDenoiser(): Promise<void> {
+  if (activeRuns > 0) { pendingReset = true; return Promise.resolve(); }
+  return exclusive(async () => {
+    // A run may have started while this reset waited for a model load.
+    if (activeRuns > 0) { pendingReset = true; return; }
     pendingReset = false;
-    void resetDenoiser();
-  }
-}
-
-export function getEngineLabel(): string {
-  return instance?.lastEngine ?? "not-loaded";
-}
-
-export async function resetDenoiser(): Promise<void> {
-  if (activeRuns > 0) {
-    // Defer until the last pipeline finishes (endRun triggers it).
-    pendingReset = true;
-    return;
-  }
-  const current = instance;
-  instance = null;
-  loadPromise = null;
-  loadedKey = null;
-  if (current) await current.release();
+    const old = instance;
+    instance = null;
+    loadedKey = null;
+    if (old) await old.release();
+  });
 }
 
 export async function getDenoiser(): Promise<DeepFilterNet> {
@@ -48,35 +40,38 @@ export async function getDenoiser(): Promise<DeepFilterNet> {
   const { runtime } = settings;
   const coreLevel = resolveCoreLevel(settings);
   const key = `${runtime}:${settings.coreMode}:${coreLevel}`;
-  if (instance && loadedKey === key) return instance;
-  if (instance && loadedKey !== key) {
-    await resetDenoiser();
-  }
-  if (!loadPromise) {
-    loadPromise = (async () => {
-      const denoiser = new DeepFilterNet();
+  return exclusive(async () => {
+    if (instance && loadedKey === key) return instance;
+    if (instance && activeRuns > 0) {
+      // Don't free a session already used by a pipeline. Apply new hardware
+      // settings after the last run finishes.
+      pendingReset = true;
+      return instance;
+    }
+    if (instance) {
+      const old = instance;
+      instance = null;
+      loadedKey = null;
+      await old.release();
+    }
+    const denoiser = new DeepFilterNet();
+    try {
       const modelAsset = Asset.fromModule(
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         require("@/assets/model/denoiser_model.ort"),
       );
       await modelAsset.downloadAsync();
-      if (!modelAsset.localUri) {
-        throw new Error("Model asset has no local URI after download");
-      }
+      if (!modelAsset.localUri) throw new Error("Model asset has no local URI after download");
       const mode: RuntimeMode = runtime;
-      console.log(
-        `[DeepFilterNet] getDenoiser runtime=${mode} coreMode=${settings.coreMode} threads=${coreLevel}`,
-      );
+      console.log(`[DeepFilterNet] loading runtime=${mode} coreMode=${settings.coreMode} threads=${coreLevel}`);
       await denoiser.loadModel(modelAsset.localUri, mode, coreLevel);
       instance = denoiser;
       loadedKey = key;
       console.log(`[DeepFilterNet] ready engine=${denoiser.lastEngine}`);
       return denoiser;
-    })();
-    loadPromise = loadPromise.catch((error) => {
-      loadPromise = null;
+    } catch (error) {
+      await denoiser.release();
       throw error;
-    });
-  }
-  return loadPromise;
+    }
+  });
 }

@@ -29,7 +29,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.6
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -66,19 +66,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/package.json') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile || bun install
+        run: bun install --frozen-lockfile
 
       - name: Typecheck
         # Catches the 6 strict-mode errors fixed in this commit (AUD-02).
         run: bunx tsc --noEmit
 
-      - name: Document picker regression tests
-        run: node tests/documentPicker.test.cjs
+      - name: Lint
+        run: bun run lint
+
+      - name: Regression tests (picker, audio, queue, storage and model)
+        run: bun run test
 
       - name: Expo Prebuild (Android only)
         run: bunx expo prebuild --platform android --clean --no-install
@@ -129,22 +132,26 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      - name: Verify native picker patch is in the APK
-        # SDK 53+ links many Expo modules from a prebuilt AAR ([📦] in the
-        # autolinking log), which silently ignores patch-package changes to
-        # their Kotlin. buildFromSource opts this one module back into a
-        # source build. Fail the build if a later SDK upgrade undoes that.
+      - name: Verify native picker and content-hash functions
+        # Prebuilt Expo AARs can silently ignore local Kotlin patches. Verify
+        # the actual binary for both APK and AAB workflow_dispatch builds.
+        shell: bash
         run: |
-          APK=$(find android/app/build/outputs/apk -name '*.apk' | head -1)
-          test -n "$APK" || { echo "::error::No APK found"; exit 1; }
-          TMP=$(mktemp -d)
-          unzip -o -q "$APK" 'classes*.dex' -d "$TMP"
-          if strings "$TMP"/classes*.dex | grep -q cancelPendingPick; then
-            echo "OK: patched cancelPendingPick present in DEX"
+          if [ "${{ steps.build.outputs.build_type }}" = "release-aab" ]; then
+            BINARY=$(find android/app/build/outputs/bundle -name '*.aab' | head -1)
+            PATTERN='base/dex/classes*.dex'
           else
-            echo "::error::cancelPendingPick missing from DEX - expo-document-picker was linked from the prebuilt AAR instead of the patched source."
-            exit 1
+            BINARY=$(find android/app/build/outputs/apk -name '*.apk' | head -1)
+            PATTERN='classes*.dex'
           fi
+          test -n "$BINARY" || { echo "::error::No Android binary found"; exit 1; }
+          TMP=$(mktemp -d)
+          unzip -q "$BINARY" "$PATTERN" -d "$TMP"
+          find "$TMP" -name '*.dex' -print0 | xargs -0 -r strings > "$TMP/dex-strings.txt"
+          for SYMBOL in cancelPendingPick copyFileWithSha256; do
+            grep -Fq "$SYMBOL" "$TMP/dex-strings.txt" || { echo "::error::$SYMBOL missing from DEX"; exit 1; }
+            echo "OK: $SYMBOL present in DEX"
+          done
 
       - name: Locate artifacts
         id: locate

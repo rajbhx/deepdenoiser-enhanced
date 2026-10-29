@@ -70,6 +70,11 @@ export async function copyFile(
   return await AudioProcessorModule.copyFile(sourceUri, destUri);
 }
 
+/** Copy a file and calculate its SHA-256 without bringing its bytes into JS. */
+export async function copyFileWithSha256(sourceUri: string, destUri: string): Promise<string> {
+  return AudioProcessorModule.copyFileWithSha256(sourceUri, destUri);
+}
+
 export async function getFileSize(path: string): Promise<number> {
   return await AudioProcessorModule.getFileSize(path);
 }

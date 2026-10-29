@@ -3,6 +3,7 @@
 # dependencies
 node_modules/
 *.lock
+!bun.lock
 bun.lockb
 yarn.lock
 package-lock.json

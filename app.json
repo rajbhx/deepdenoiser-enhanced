@@ -22,7 +22,8 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
-      ]
+      ],
+      "versionCode": 2
     },
     "plugins": [
       "./plugins/withNdkVersion",
@@ -106,6 +107,6 @@
       }
     },
     "owner": "deepdenoiser",
-    "version": "1.5.0"
+    "version": "2.0.0"
   }
 }

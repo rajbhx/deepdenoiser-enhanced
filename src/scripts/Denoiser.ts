@@ -16,6 +16,7 @@ export class DeepFilterNet {
     private readonly hopSize: number;
     private readonly fftSize: number;
     private readonly stateInputNames: string[];
+    private readonly stateOutputNames: string[];
     private readonly hasSingleStateTensor: boolean;
     private readonly statesShape: number[];
     private readonly statesLen: number;
@@ -54,9 +55,15 @@ export class DeepFilterNet {
         this.inputNames = metadata.inputs.map((i) => i.name);
         this.outputNames = metadata.outputs.map((o) => o.name);
 
-        this.stateInputNames = this.inputNames.filter(
-            (name) => name !== "input_frame" && name !== "atten_lim_db",
-        );
+        this.stateInputNames = metadata.state_input_names.length
+            ? [...metadata.state_input_names]
+            : this.inputNames.filter((name) => name !== "input_frame" && name !== "atten_lim_db");
+        this.stateOutputNames = this.stateInputNames.map((name) => {
+            if (!this.inputNames.includes(name)) throw new Error(`Missing model state input: ${name}`);
+            const output = `new_${name}`;
+            if (!this.outputNames.includes(output)) throw new Error(`Missing model state output: ${output}`);
+            return output;
+        });
         this.hasSingleStateTensor = this.stateInputNames.includes("states");
 
         if (this.hasSingleStateTensor) {
@@ -188,11 +195,11 @@ export class DeepFilterNet {
         // (buffer reuse — no new Tensor objects per frame, avoiding GC churn
         // across the 100k+ frames of a long file).
         if (this.hasSingleStateTensor) {
-            const nextStateRaw = results[this.outputNames[1]].data as Float32Array;
+            const nextStateRaw = results[this.stateOutputNames[0]].data as Float32Array;
             stateBuffers[0].set(nextStateRaw);
         } else {
             for (let j = 0; j < this.stateInputNames.length; j++) {
-                const nextMultiStateRaw = results[this.outputNames[j + 1]].data as Float32Array;
+                const nextMultiStateRaw = results[this.stateOutputNames[j]].data as Float32Array;
                 stateBuffers[j].set(nextMultiStateRaw);
             }
         }
@@ -234,9 +241,11 @@ export class DeepFilterNet {
         } else {
             states = [];
             stateBuffers = [];
-            const stateInputsMeta = metadata.inputs.filter((i) =>
-                this.stateInputNames.includes(i.name),
-            );
+            const stateInputsMeta = this.stateInputNames.map((name) => {
+                const meta = metadata.inputs.find((input) => input.name === name);
+                if (!meta) throw new Error(`Missing metadata for model state: ${name}`);
+                return meta;
+            });
             for (const meta of stateInputsMeta) {
                 const size = meta.shape.reduce((a, b) => a * b, 1);
                 const buffer = new Float32Array(size);
@@ -352,12 +361,12 @@ export class DeepFilterNet {
                 f.enhancedAudio.set(outFrameRaw, start);
 
                 if (this.hasSingleStateTensor) {
-                    const nextStateRaw = results[this.outputNames[1]].data as Float32Array;
+                    const nextStateRaw = results[this.stateOutputNames[0]].data as Float32Array;
                     f.states = new Tensor("float32", nextStateRaw, this.statesShape);
                 } else {
                     const newStates: Tensor[] = [];
                     for (let j = 0; j < this.stateInputNames.length; j++) {
-                        const nextMultiStateRaw = results[this.outputNames[j + 1]].data as Float32Array;
+                        const nextMultiStateRaw = results[this.stateOutputNames[j]].data as Float32Array;
                         const originalShape = (f.states as Tensor[])[j].dims;
                         newStates.push(new Tensor("float32", nextMultiStateRaw, originalShape));
                     }

@@ -24,6 +24,8 @@ export type SilenceTrimNativeConfig = {
   mode: "auto" | "manual";
   thresholdDb: number;
   minSilenceMs: number;
+  /** Remove long pauses inside audio; videos keep this disabled. */
+  removeInternalPauses?: boolean;
 };
 
 /**

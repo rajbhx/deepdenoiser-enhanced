@@ -79,7 +79,7 @@ export async function getSettings(): Promise<AppSettings> {
   try {
     const file = new File(Paths.document, SETTINGS_FILE_NAME);
     if (!file.exists) {
-      return DEFAULT_SETTINGS;
+      return { ...DEFAULT_SETTINGS };
     }
     const content = await file.text();
     const parsed = JSON.parse(content) as Partial<AppSettings>;
@@ -107,11 +107,20 @@ export async function getSettings(): Promise<AppSettings> {
     };
   } catch (error) {
     console.error("Error reading settings:", error);
-    return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS };
   }
 }
 
-export async function updateSettings(newSettings: Partial<AppSettings>): Promise<AppSettings> {
+// Serialise read-modify-write so simultaneous UI updates never clobber one
+// another. A failed write is propagated but does not poison the queue.
+let settingsQueue: Promise<void> = Promise.resolve();
+function queueSettings<T>(work: () => Promise<T>): Promise<T> {
+  const result = settingsQueue.then(work, work);
+  settingsQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function updateSettingsUnlocked(newSettings: Partial<AppSettings>): Promise<AppSettings> {
   const currentSettings = await getSettings();
   const updatedSettings = { ...currentSettings, ...newSettings };
   if (newSettings.runtime) {
@@ -123,20 +132,31 @@ export async function updateSettings(newSettings: Partial<AppSettings>): Promise
   if (newSettings.attenPreset && newSettings.attenPreset !== "custom") {
     updatedSettings.attenLimDb = ATTEN_PRESET_DB[newSettings.attenPreset];
   }
+  const target = new File(Paths.document, SETTINGS_FILE_NAME);
+  const tempName = `${SETTINGS_FILE_NAME}.${Date.now()}_${Math.random().toString(36).slice(2)}.tmp`;
+  const temp = new File(Paths.document, tempName);
   try {
-    const file = new File(Paths.document, SETTINGS_FILE_NAME);
-    if (!file.exists) {
-      file.create();
-    }
-    await file.write(JSON.stringify(updatedSettings));
-    return updatedSettings;
+    await temp.write(JSON.stringify(updatedSettings));
+    await temp.move(target, { overwrite: true });
   } catch (error) {
     console.error("Error saving settings:", error);
-    return updatedSettings;
+    throw new Error(`Could not save settings: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    const leftover = new File(Paths.document, tempName);
+    if (leftover.exists) {
+      try { leftover.delete(); } catch { /* best effort */ }
+    }
   }
+  return updatedSettings;
 }
 
-export async function incrementDenoiseCount(): Promise<void> {
-  const settings = await getSettings();
-  await updateSettings({ denoiseCount: settings.denoiseCount + 1 });
+export function updateSettings(newSettings: Partial<AppSettings>): Promise<AppSettings> {
+  return queueSettings(() => updateSettingsUnlocked(newSettings));
+}
+
+export function incrementDenoiseCount(): Promise<void> {
+  return queueSettings(async () => {
+    const settings = await getSettings();
+    await updateSettingsUnlocked({ denoiseCount: settings.denoiseCount + 1 });
+  });
 }

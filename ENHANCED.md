@@ -1,5 +1,15 @@
 # DeepDenoiser Enhanced — Changelog & Technical Notes
 
+## v2.0.0 (2026-10-29)
+
+- Sequential batch processing for up to 20 audio/video files, cooperative stop, per-file retry and persistent results.
+- Synchronized original/cleaned audio comparison for untrimmed audio and recordings; video/trimmed audio retain separate players.
+- Full-content SHA-256 import identity; non-overwriting outputs; serialized, replacement-written cache/settings indexes.
+- Chunk-continuous anti-aliased resampling, metadata-based framing/state names, recording delay compensation, safer media/model lifecycle, deferred permission prompts.
+- Pinned Bun and lockfile; regression suite; CI verifies native picker recovery and hashing symbols in APK/AAB DEX.
+- Queue is foreground-only; a real-device smoke test is required before release. See `docs/UPGRADE_2.0.md`.
+
+
 ## v1.5.0-enhanced (2026-10-27)
 
 ### Hardware Acceleration

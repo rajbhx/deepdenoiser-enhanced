@@ -1,35 +1,24 @@
 import metadata from "@/assets/model/model_metadata.json";
-import { copyFile, getFileSize } from "@/modules/AudioProcessorModule";
+import { copyFileWithSha256 } from "@/modules/AudioProcessorModule";
 import * as fs from "expo-file-system";
 import { sanitizeFileName } from "./formatHandler";
 
-/**
- * Persistent working storage for imported/shared files and denoised results.
- *
- * We deliberately do NOT store these in the OS cache directory:
- *  - The system can evict cache files at any time (the DocumentPicker ENOENT
- *    crashes were caused by cache files disappearing mid-processing).
- *  - Denoised outputs are keyed by input so identical re-runs (e.g. "Try Again")
- *    can be served instantly instead of re-running the whole pipeline.
- */
-
+/** Private, persistent storage for imported media and finished outputs. */
 const IMPORTS_DIR_NAME = "imports";
 const OUTPUTS_DIR_NAME = "denoised";
 const INDEX_FILE_NAME = "denoiser_cache.json";
+const DECODE_INDEX_NAME = "decode_cache.json";
+const DENOISE_INDEX_NAME = "denoise_cache.json";
+const MAX_CACHED_OUTPUTS = 100;
+const MAX_CACHED_DECODES = 5;
+const MAX_CACHED_DENOISES = 8;
+/** Bump when the model, input framing or resampler changes. */
+const PIPELINE_VERSION = "dfn3-v2-streaming-resampler";
 
-/** Keep at most this many cached results; oldest are pruned first. */
-const MAX_CACHED_OUTPUTS = 30;
-
-interface CacheEntry {
-  path: string;
-  createdAt: number;
-}
-
+interface CacheEntry { path: string; createdAt: number }
+interface DecodeEntry extends CacheEntry { sampleRate: number }
+type DenoiseEntry = CacheEntry;
 type CacheIndex = Record<string, CacheEntry>;
-
-// ---------------------------------------------------------------------------
-// Directories
-// ---------------------------------------------------------------------------
 
 function importsDir(): fs.Directory {
   const dir = new fs.Directory(fs.Paths.document, IMPORTS_DIR_NAME);
@@ -43,25 +32,6 @@ export function outputDir(): fs.Directory {
   return dir;
 }
 
-/**
- * Copies a picked/shared file (file:// or content://) into app documents so
- * it survives process death, cache eviction and source-app revocation.
- * Returns the stable file:// File ready for processing.
- *
- * The import keeps the SOURCE file name (no timestamp prefix) and is reused
- * when the same file is picked again (same name + same size). A stable name
- * and unchanged mtime make buildCacheKey() produce the same key, so
- * re-denosing an unchanged file serves the cached result instantly instead of
- * starting from blank. A re-pick of a different file with the same name but a
- * different size overwrites the import (and therefore misses the cache).
- */
-/**
- * Normalise a file:// URI so that it always uses the triple-slash form
- * (`file:///path`).  Java's `File.toURI().toString()` emits `file:/path`
- * (one slash, authority null) which expo-file-system and some Android
- * code-paths interpret as a literal path `file:/…` instead of stripping
- * the scheme.
- */
 function normalizeFileUri(uri: string): string {
   if (uri.startsWith("file:/") && !uri.startsWith("file:///")) {
     return "file:///" + uri.slice("file:/".length);
@@ -69,350 +39,266 @@ function normalizeFileUri(uri: string): string {
   return uri;
 }
 
+function safeName(name: string, limit = 170): string {
+  const safe = sanitizeFileName(name || "import");
+  const dot = safe.lastIndexOf(".");
+  const ext = dot > 0 ? safe.slice(dot, dot + 16) : "";
+  const base = dot > 0 ? safe.slice(0, dot) : safe;
+  return `${base.slice(0, Math.max(1, limit - ext.length))}${ext}`;
+}
+
+function uniqueSuffix(): string {
+  return `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Copy and hash the entire source in native streaming code. The temporary file
+ * is never promoted until the copy succeeds. Identical bytes + names reuse an
+ * immutable import; same-name/same-size *different* media cannot collide.
+ */
 export async function importToDocuments(
   sourceUri: string,
   name: string,
   fallbackUri?: string,
 ): Promise<fs.File> {
-  const safe = sanitizeFileName(name || "import");
-  const destName = name && name.trim().length > 0 ? safe : `import_${Date.now()}`;
-  const dest = new fs.File(importsDir(), destName);
-
-  const normalizedSource = normalizeFileUri(sourceUri);
-
-  if (dest.exists) {
-    try {
-      const sourceSize = await getFileSize(normalizedSource);
-      if (sourceSize >= 0 && dest.size === sourceSize) {
-        // Same file re-imported — reuse the existing copy so its mtime (and
-        // therefore the denoise cache key) stays stable.
-        return dest;
-      }
-    } catch {
-      // Cannot read the source size — fall through and re-copy.
-    }
-    try {
-      dest.delete();
-    } catch {
-      // Ignore; copyFile overwrites the existing file in place anyway.
-    }
-  }
-
+  const dir = importsDir();
+  const pendingName = `_pending_${uniqueSuffix()}.tmp`;
+  const pending = new fs.File(dir, pendingName);
   try {
-    await copyFile(normalizedSource, dest.uri);
-    return dest;
-  } catch (primaryErr) {
-    // The primary file:// URI may point to a cache copy that was silently
-    // dropped by expo-sharing.  If a content:// fallback was provided, try
-    // reading directly from it before giving up.
-    if (fallbackUri) {
-      try {
-        await copyFile(fallbackUri, dest.uri);
-        return dest;
-      } catch (fallbackErr) {
-        console.warn("Fallback content:// copy also failed:", fallbackErr);
-      }
+    let digest: string;
+    try {
+      digest = await copyFileWithSha256(normalizeFileUri(sourceUri), pending.uri);
+    } catch (primaryError) {
+      if (!fallbackUri) throw primaryError;
+      // Native code removes partial files before rejecting.
+      digest = await copyFileWithSha256(normalizeFileUri(fallbackUri), pending.uri);
     }
-    throw primaryErr;
+    if (!/^[a-f0-9]{64}$/i.test(digest)) throw new Error("Could not verify imported file.");
+    const dest = new fs.File(dir, `${digest.toLowerCase()}_${safeName(name)}`);
+    if (dest.exists) return dest;
+    try {
+      await pending.move(dest);
+    } catch (error) {
+      // A concurrent import of the same digest can win the move.
+      if (!dest.exists) throw error;
+    }
+    return dest;
+  } finally {
+    // After move(), pending.uri points at dest; never delete a promoted file.
+    // Check against the original pending name instead of the mutable File URI.
+    const leftover = new fs.File(dir, pendingName);
+    if (leftover.exists) {
+      try { leftover.delete(); } catch { /* best effort */ }
+    }
   }
 }
 
-/**
- * Moves a finished output file into the persistent outputs directory.
- * Returns the relocated File.
- */
+/** Allocate a non-overwriting output name, even for inputs with identical names. */
+function newOutput(name: string): fs.File {
+  const safe = safeName(name, 190);
+  let dest = new fs.File(outputDir(), safe);
+  if (dest.exists) {
+    const dot = safe.lastIndexOf(".");
+    const base = dot > 0 ? safe.slice(0, dot) : safe;
+    const ext = dot > 0 ? safe.slice(dot) : "";
+    dest = new fs.File(outputDir(), `${base}_${uniqueSuffix()}${ext}`);
+  }
+  return dest;
+}
+
+/** Finished media is persistent and never overwritten or deleted by cache pruning. */
 export async function placeOutput(source: fs.File, name: string): Promise<fs.File> {
-  const dest = new fs.File(outputDir(), sanitizeFileName(name));
-  if (dest.exists) dest.delete();
+  const dest = newOutput(name);
   await source.move(dest);
   return dest;
 }
 
-// ---------------------------------------------------------------------------
-// Generic JSON index helpers (shared by the final-output cache and the
-// layered pipeline caches below).
-// ---------------------------------------------------------------------------
+/** Copy an externally owned recording to durable storage without removing its source. */
+export async function copyOutput(source: fs.File, name: string): Promise<fs.File> {
+  const dest = newOutput(name);
+  await source.copy(dest);
+  return dest;
+}
+
+// The app has a single JS runtime, so a per-index promise queue serializes
+// every read/modify/write. A temp-file move keeps the previous index intact if
+// JSON writing fails. A rejected mutation never poisons the queue.
+const indexLocks = new Map<string, Promise<void>>();
+function withIndexLock<T>(fileName: string, work: () => Promise<T>): Promise<T> {
+  const previous = indexLocks.get(fileName) ?? Promise.resolve();
+  const result = previous.then(work, work);
+  const settled = result.then(() => undefined, () => undefined);
+  indexLocks.set(fileName, settled);
+  void settled.then(() => {
+    if (indexLocks.get(fileName) === settled) indexLocks.delete(fileName);
+  });
+  return result;
+}
 
 async function readJsonIndex<T>(fileName: string): Promise<Record<string, T>> {
   try {
     const file = new fs.File(fs.Paths.document, fileName);
     if (!file.exists) return {};
     const raw = await file.text();
-    if (!raw.trim()) return {};
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null ? parsed : {};
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, T> : {};
   } catch (error) {
-    console.error(`Failed to read ${fileName}:`, error);
+    console.warn(`Could not read cache index ${fileName}:`, error);
     return {};
   }
 }
 
 async function writeJsonIndex<T>(fileName: string, index: Record<string, T>): Promise<void> {
+  const temp = new fs.File(fs.Paths.document, `${fileName}.${uniqueSuffix()}.tmp`);
   try {
-    new fs.File(fs.Paths.document, fileName).write(JSON.stringify(index), {
-      encoding: "utf8",
-    });
-  } catch (error) {
-    console.error(`Failed to write ${fileName}:`, error);
+    await temp.write(JSON.stringify(index), { encoding: "utf8" });
+    await temp.move(new fs.File(fs.Paths.document, fileName), { overwrite: true });
+  } finally {
+    // temp moves to the target on success; only clean a still-temporary URI.
+    if (temp.name.endsWith(".tmp") && temp.exists) {
+      try { temp.delete(); } catch { /* best effort */ }
+    }
   }
 }
 
-function pruneOldest<T extends { createdAt: number; path?: string }>(
-  index: Record<string, T>,
-  maxEntries: number,
-): void {
+function pruneOldest<T extends CacheEntry>(index: Record<string, T>, max: number, deleteFiles: boolean): void {
   const keys = Object.keys(index);
-  if (keys.length <= maxEntries) return;
-  const oldest = keys
-    .sort((a, b) => (index[a].createdAt || 0) - (index[b].createdAt || 0))
-    .slice(0, keys.length - maxEntries);
+  if (keys.length <= max) return;
+  const oldest = keys.sort((a, b) => index[a].createdAt - index[b].createdAt).slice(0, keys.length - max);
   for (const key of oldest) {
-    const path = index[key]?.path;
-    if (path) {
+    if (deleteFiles && index[key]?.path) {
       try {
-        new fs.File(path).delete();
-      } catch (error) {
-        console.warn("Failed to delete pruned cache file:", error);
-      }
+        const file = new fs.File(index[key].path);
+        if (file.exists) file.delete();
+      } catch (error) { console.warn("Failed to delete old PCM cache:", error); }
     }
     delete index[key];
   }
 }
 
-// ---------------------------------------------------------------------------
-// Denoise result cache (final outputs)
-// ---------------------------------------------------------------------------
-
-async function readIndex(): Promise<CacheIndex> {
-  return readJsonIndex<CacheEntry>(INDEX_FILE_NAME);
+/** Identity includes immutable SHA-256 import path; legacy/external paths also include URI and mtime. */
+export function buildInputIdentity(input: fs.File): string {
+  return ["input-v2", input.uri, input.size, input.modificationTime ?? "unknown"].join("|");
 }
 
-async function writeIndex(index: CacheIndex): Promise<void> {
-  await writeJsonIndex<CacheEntry>(INDEX_FILE_NAME, index);
-}
-
-/**
- * Cache key for a denoise run. Identical inputs + settings always produce the
- * same key, so "Try Again" with unchanged settings hits the cache.
- */
 export function buildCacheKey(
   input: fs.File,
   settings: {
     attenLimDb: number;
     normalize: { toggle: boolean; targetRMS: number; maxPeakDb: number };
-    silenceTrim: {
-      enabled: boolean;
-      mode: string;
-      thresholdDb: number;
-      minSilenceMs: number;
-    };
+    silenceTrim: { enabled: boolean; mode: string; thresholdDb: number; minSilenceMs: number };
   },
 ): string {
-  const modelSignature = `${metadata.hop_size}-${metadata.fft_size}`;
   return [
-    "v1",
-    modelSignature,
-    input.name,
-    input.size,
-    input.modificationTime,
-    settings.attenLimDb,
-    settings.normalize.toggle,
-    settings.normalize.targetRMS,
-    settings.normalize.maxPeakDb,
-    settings.silenceTrim.enabled,
-    settings.silenceTrim.mode,
-    settings.silenceTrim.thresholdDb,
-    settings.silenceTrim.minSilenceMs,
+    "out-v2", PIPELINE_VERSION, `${metadata.hop_size}-${metadata.fft_size}`,
+    buildInputIdentity(input), settings.attenLimDb, settings.normalize.toggle,
+    settings.normalize.targetRMS, settings.normalize.maxPeakDb,
+    settings.silenceTrim.enabled, settings.silenceTrim.mode,
+    settings.silenceTrim.thresholdDb, settings.silenceTrim.minSilenceMs,
   ].join("|");
 }
 
-/** Returns the cached output for `key`, or null on miss / missing file. */
-export async function lookupCachedOutput(key: string): Promise<fs.File | null> {
-  const index = await readIndex();
-  const entry = index[key];
-  if (!entry) return null;
-  const file = new fs.File(entry.path);
-  if (!file.exists) {
-    delete index[key];
-    await writeIndex(index);
-    return null;
-  }
-  return file;
-}
-
-/** Stores a finished output under `key`, pruning the oldest entries. */
-export async function storeCachedOutput(key: string, file: fs.File): Promise<void> {
-  const index = await readIndex();
-
-  // Invalidate stale entries that point to the same physical file.
-  // placeOutput() uses a deterministic filename per input, so different
-  // settings produce different keys but overwrite the same path — the old
-  // entry would otherwise return the wrong (previously-trimmed) content.
-  for (const [otherKey, entry] of Object.entries(index)) {
-    if (otherKey !== key && entry.path === file.uri) {
-      delete index[otherKey];
-    }
-  }
-
-  index[key] = { path: file.uri, createdAt: Date.now() };
-  pruneOldest(index, MAX_CACHED_OUTPUTS);
-  await writeIndex(index);
-}
-
-// ---------------------------------------------------------------------------
-// Layered pipeline cache (decode + denoise intermediates)
-// ---------------------------------------------------------------------------
-//
-// Re-denoising the SAME file with DIFFERENT settings re-runs expensive steps
-// (audio extraction, PCM decode, ONNX inference) that produce identical
-// intermediates. Two extra cache layers reuse them:
-//
-//  - decode layer:  input identity (name+size+mtime) -> decoded PCM at the
-//                   SOURCE sample rate. Skipping it saves the MediaExtractor
-//                   + MediaCodec decode on every re-run.
-//  - denoise layer: decode identity + attenLimDb + normalize -> denoised PCM
-//                   at 48 kHz. Skipping it saves the entire ONNX pass; only
-//                   the cheap native WAV wrap + silence trim is re-applied, so
-//                   toggling trim on/off (or changing its settings) no longer
-//                   re-runs the model — "trim off" simply re-wraps the
-//                   previously denoised audio at full length.
-//
-// Files live in the OS cache under names that cleanupTempCache() deliberately
-// does NOT match, and are deleted by pruning or OS eviction. A missing file
-// just falls back to re-running that step (the lookup validates existence).
-
-const DECODE_INDEX_NAME = "decode_cache.json";
-const DENOISE_INDEX_NAME = "denoise_cache.json";
-const MAX_CACHED_DECODES = 5;
-const MAX_CACHED_DENOISES = 8;
-
-interface DecodeEntry {
-  path: string;
-  sampleRate: number;
-  createdAt: number;
-}
-
-interface DenoiseEntry {
-  path: string;
-  createdAt: number;
-}
-
-/** Unique identity of an input file (stable across identical re-imports). */
-export function buildInputIdentity(input: fs.File): string {
-  return [input.name, input.size, input.modificationTime].join("|");
-}
-
-/** Key for the decode layer (input identity only — settings-agnostic). */
 export function buildDecodeKey(input: fs.File): string {
-  return ["dec-v1", buildInputIdentity(input)].join("|");
+  return ["dec-v2", buildInputIdentity(input)].join("|");
 }
 
-/** Key for the denoise layer (input identity + denoise settings). */
 export function buildDenoiseKey(
   input: fs.File,
-  settings: {
-    attenLimDb: number;
-    normalize: { toggle: boolean; targetRMS: number; maxPeakDb: number };
-  },
+  settings: { attenLimDb: number; normalize: { toggle: boolean; targetRMS: number; maxPeakDb: number } },
 ): string {
-  return [
-    "dn-v1",
-    buildInputIdentity(input),
-    settings.attenLimDb,
-    settings.normalize.toggle,
-    settings.normalize.targetRMS,
-    settings.normalize.maxPeakDb,
-  ].join("|");
+  return ["dn-v2", PIPELINE_VERSION, buildInputIdentity(input), settings.attenLimDb,
+    settings.normalize.toggle, settings.normalize.targetRMS, settings.normalize.maxPeakDb].join("|");
 }
 
-/** Stable-ish name for a staged intermediate PCM (never matches cleanupTempCache). */
 export function stagePcmPath(prefix: "stage_dec" | "stage_dn"): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.pcm`;
+  return `${prefix}_${uniqueSuffix()}.pcm`;
 }
 
-export async function lookupDecodedPCM(
-  key: string,
-): Promise<{ file: fs.File; sampleRate: number } | null> {
-  const index = await readJsonIndex<DecodeEntry>(DECODE_INDEX_NAME);
-  const entry = index[key];
-  if (!entry) return null;
-  const file = new fs.File(entry.path);
-  if (!file.exists) {
+export function lookupCachedOutput(key: string): Promise<fs.File | null> {
+  return withIndexLock(INDEX_FILE_NAME, async () => {
+    const index = await readJsonIndex<CacheEntry>(INDEX_FILE_NAME);
+    const entry = index[key];
+    if (!entry) return null;
+    const file = new fs.File(entry.path);
+    if (file.exists) return file;
+    delete index[key];
+    await writeJsonIndex(INDEX_FILE_NAME, index);
+    return null;
+  });
+}
+
+export function storeCachedOutput(key: string, file: fs.File): Promise<void> {
+  return withIndexLock(INDEX_FILE_NAME, async () => {
+    const index: CacheIndex = await readJsonIndex(INDEX_FILE_NAME);
+    index[key] = { path: file.uri, createdAt: Date.now() };
+    // Finished output is the user's media, not disposable cache data.
+    pruneOldest(index, MAX_CACHED_OUTPUTS, false);
+    await writeJsonIndex(INDEX_FILE_NAME, index);
+  });
+}
+
+export function lookupDecodedPCM(key: string): Promise<{ file: fs.File; sampleRate: number } | null> {
+  return withIndexLock(DECODE_INDEX_NAME, async () => {
+    const index = await readJsonIndex<DecodeEntry>(DECODE_INDEX_NAME);
+    const entry = index[key];
+    if (!entry) return null;
+    const file = new fs.File(entry.path);
+    if (file.exists) return { file, sampleRate: entry.sampleRate };
     delete index[key];
     await writeJsonIndex(DECODE_INDEX_NAME, index);
     return null;
-  }
-  return { file, sampleRate: entry.sampleRate };
+  });
 }
 
-export async function storeDecodedPCM(
-  key: string,
-  file: fs.File,
-  sampleRate: number,
-): Promise<void> {
-  const index = await readJsonIndex<DecodeEntry>(DECODE_INDEX_NAME);
-  index[key] = { path: file.uri, sampleRate, createdAt: Date.now() };
-  pruneOldest(index, MAX_CACHED_DECODES);
-  await writeJsonIndex(DECODE_INDEX_NAME, index);
+export function storeDecodedPCM(key: string, file: fs.File, sampleRate: number): Promise<void> {
+  return withIndexLock(DECODE_INDEX_NAME, async () => {
+    const index = await readJsonIndex<DecodeEntry>(DECODE_INDEX_NAME);
+    index[key] = { path: file.uri, sampleRate, createdAt: Date.now() };
+    pruneOldest(index, MAX_CACHED_DECODES, true);
+    await writeJsonIndex(DECODE_INDEX_NAME, index);
+  });
 }
 
-export async function lookupDenoisedPCM(key: string): Promise<fs.File | null> {
-  const index = await readJsonIndex<DenoiseEntry>(DENOISE_INDEX_NAME);
-  const entry = index[key];
-  if (!entry) return null;
-  const file = new fs.File(entry.path);
-  if (!file.exists) {
+export function lookupDenoisedPCM(key: string): Promise<fs.File | null> {
+  return withIndexLock(DENOISE_INDEX_NAME, async () => {
+    const index = await readJsonIndex<DenoiseEntry>(DENOISE_INDEX_NAME);
+    const entry = index[key];
+    if (!entry) return null;
+    const file = new fs.File(entry.path);
+    if (file.exists) return file;
     delete index[key];
     await writeJsonIndex(DENOISE_INDEX_NAME, index);
     return null;
-  }
-  return file;
+  });
 }
 
-export async function storeDenoisedPCM(key: string, file: fs.File): Promise<void> {
-  const index = await readJsonIndex<DenoiseEntry>(DENOISE_INDEX_NAME);
-  index[key] = { path: file.uri, createdAt: Date.now() };
-  pruneOldest(index, MAX_CACHED_DENOISES);
-  await writeJsonIndex(DENOISE_INDEX_NAME, index);
+export function storeDenoisedPCM(key: string, file: fs.File): Promise<void> {
+  return withIndexLock(DENOISE_INDEX_NAME, async () => {
+    const index = await readJsonIndex<DenoiseEntry>(DENOISE_INDEX_NAME);
+    index[key] = { path: file.uri, createdAt: Date.now() };
+    pruneOldest(index, MAX_CACHED_DENOISES, true);
+    await writeJsonIndex(DENOISE_INDEX_NAME, index);
+  });
 }
 
-// ---------------------------------------------------------------------------
-// Cache cleanup
-// ---------------------------------------------------------------------------
-
-/** Temp artifacts this app drops in the OS cache (recording/processing). */
-const TEMP_CACHE_PATTERNS: RegExp[] = [
-  /^orig_\d+\.pcm$/,
-  /^den_\d+\.pcm$/,
-  /^denoised_\d+\.pcm$/,
-  /^denoised_\d+\.m4a$/,
-  /^denoised_\d+\.wav$/,
-  /^denoised_\d+\.mp4$/,
-  /^processed_\d+\.pcm$/,
-  /^remux_\d+\.mp4$/,
-];
-
-/**
- * Removes only this app's leftover temp PCM/encode artifacts from the OS
- * cache. Deliberately does NOT touch directories (e.g. the DocumentPicker
- * working dir) or files it does not recognize — a blanket cache wipe was the
- * root cause of the "Failed to open data source: ENOENT" crashes.
- */
-export function cleanupTempCache(): void {
+/** Remove only old, unindexed scratch files. Never sweep picker files or finished WAV/MP4s. */
+export async function cleanupTempCache(): Promise<void> {
   try {
+    const decode = await withIndexLock(DECODE_INDEX_NAME, () => readJsonIndex<DecodeEntry>(DECODE_INDEX_NAME));
+    const denoise = await withIndexLock(DENOISE_INDEX_NAME, () => readJsonIndex<DenoiseEntry>(DENOISE_INDEX_NAME));
+    const protectedPaths = new Set([...Object.values(decode), ...Object.values(denoise)].map((e) => e.path));
     const cache = new fs.Directory(fs.Paths.cache);
     if (!cache.exists) return;
+    const olderThan = Date.now() - 24 * 60 * 60 * 1000;
+    const patterns = [/^orig_\d+\.pcm$/, /^den_\d+\.pcm$/, /^processed_\d+\.pcm$/,
+      /^stage_(dec|dn)_\d+_[a-z0-9]+\.pcm$/, /^remux_\d+\.mp4$/];
     for (const entry of cache.list()) {
-      if (entry instanceof fs.Directory) continue;
-      if (TEMP_CACHE_PATTERNS.some((pattern) => pattern.test(entry.name))) {
-        try {
-          entry.delete();
-        } catch (error) {
-          console.warn(`Failed to delete temp cache file ${entry.name}:`, error);
-        }
+      if (entry instanceof fs.Directory || protectedPaths.has(entry.uri)) continue;
+      if (!entry.modificationTime || entry.modificationTime > olderThan) continue;
+      if (patterns.some((pattern) => pattern.test(entry.name))) {
+        try { entry.delete(); } catch (error) { console.warn("Could not remove old scratch file:", error); }
       }
     }
-  } catch (error) {
-    console.warn("Failed to clean temp cache:", error);
-  }
+  } catch (error) { console.warn("Could not clean scratch files:", error); }
 }

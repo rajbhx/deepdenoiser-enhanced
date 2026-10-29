@@ -23,7 +23,7 @@ import {
  *      activity being killed while the picker is up — never settles, so EVERY
  *      later pick throws that same error.
  *
- * patches/expo-document-picker+57.0.1.patch adds `cancelPendingPick()` to the
+ * patches/expo-document-picker+57.0.3.patch adds `cancelPendingPick()` to the
  * native module so case 2 is recoverable. This module serialises calls, watches
  * the app lifecycle, and uses that escape hatch when a result goes missing.
  */

@@ -36,6 +36,7 @@ declare class AudioProcessorModule extends NativeModule<AudioProcessorModuleEven
     trim?: VideoTrimConfig | null,
   ): Promise<string>;
   copyFile(sourceUri: string, destUri: string): Promise<string>;
+  copyFileWithSha256(sourceUri: string, destUri: string): Promise<string>;
   getFileSize(path: string): Promise<number>;
 }
 

@@ -1,9 +1,9 @@
 import * as theme from "@/src/constants/theme";
 import { Feather } from "@expo/vector-icons";
 import Constants from "expo-constants";
-import { Host, Switch } from "@expo/ui/jetpack-compose";
 import React, { useEffect, useState } from "react";
 import {
+  Alert,
   Modal,
   Pressable,
   StyleSheet,
@@ -44,9 +44,12 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
     }
   }, [visible]);
 
-  const handleToggle = async (key: keyof AppSettings, value: boolean) => {
-    const updated = await updateSettings({ [key]: value });
-    setSettings(updated);
+  const saveSettings = async (patch: Partial<AppSettings>): Promise<AppSettings | null> => {
+    try { return await updateSettings(patch); }
+    catch (error) {
+      Alert.alert("Settings not saved", error instanceof Error ? error.message : String(error));
+      return null;
+    }
   };
 
   if (!settings) return null;
@@ -94,8 +97,8 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
                         key={id}
                         style={[styles.coreChip, selected && styles.coreChipOn]}
                         onPress={async () => {
-                          const updated = await updateSettings({ attenPreset: id });
-                          setSettings(updated);
+                          const updated = await saveSettings({ attenPreset: id });
+                          if (updated) setSettings(updated);
                         }}
                       >
                         <Text style={[styles.coreChipText, selected && styles.coreChipTextOn]}>
@@ -112,7 +115,7 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
               <View style={styles.settingTextContainer}>
                 <Text style={styles.settingLabel}>Runtime</Text>
                 <Text style={styles.settingDescription}>
-                  Auto/XNNPACK = best on OnePlus 7. GPU = NNAPI GPU try (not OpenCL). Engine: {engine}
+                  Auto/XNNPACK = best on OnePlus 7. GPU = NNAPI GPU try (not OpenCL). Attempted provider: {engine}
                 </Text>
                 <View style={styles.coreRow}>
                   {(
@@ -131,7 +134,8 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
                         style={[styles.coreChip, selected && styles.coreChipOn]}
                         onPress={async () => {
                           if (id === settings.runtime) return;
-                          const updated = await updateSettings({ runtime: id });
+                          const updated = await saveSettings({ runtime: id });
+                          if (!updated) return;
                           setSettings(updated);
                           await resetDenoiser();
                           setEngine("not-loaded");
@@ -173,7 +177,8 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
                             id === "auto"
                               ? { coreMode: "auto" as const }
                               : { coreMode: id as 2 | 4 | 8, coreLevel: id as 2 | 4 | 8 };
-                          const updated = await updateSettings(patch);
+                          const updated = await saveSettings(patch);
+                          if (!updated) return;
                           setSettings(updated);
                           await resetDenoiser();
                           setEngine("not-loaded");
@@ -190,29 +195,6 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
             </View>
           </View>
 
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>App</Text>
-            <View style={styles.settingItem}>
-              <View style={styles.settingTextContainer}>
-                <Text style={styles.settingLabel}>Check for Updates</Text>
-                <Text style={styles.settingDescription}>
-                  Check for new versions on startup.
-                </Text>
-              </View>
-              <Host matchContents style={{ width: 52, height: 32 }} colorScheme="dark">
-                <Switch
-                  value={settings.checkForUpdates}
-                  onCheckedChange={(v) => handleToggle("checkForUpdates", v)}
-                  colors={{
-                    uncheckedTrackColor: theme.COLORS.border,
-                    checkedTrackColor: theme.COLORS.primary,
-                    checkedThumbColor: theme.COLORS.white,
-                    uncheckedThumbColor: theme.COLORS.white,
-                  }}
-                />
-              </Host>
-            </View>
-          </View>
 
           <View style={styles.footer}>
             <Text style={styles.version}>Version {Constants.expoConfig?.version}</Text>

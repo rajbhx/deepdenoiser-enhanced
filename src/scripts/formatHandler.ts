@@ -10,6 +10,7 @@ import { Asset, Album, requestPermissionsAsync } from "expo-media-library";
 import { trackAppEvent } from "./analytics";
 import type { SilenceTrimSettings } from "./silenceTrim";
 import { trimToNativeConfig } from "./silenceTrim";
+import { StreamingResampler } from "./resampler";
 
 const ILLEGAL_FS_CHARS = /[^a-zA-Z0-9._-]/g;
 
@@ -90,77 +91,30 @@ export async function PCMtoWav(
   sampleRate: number = 48000,
   silenceTrim?: SilenceTrimSettings,
 ): Promise<WavResult> {
+  const outputFile = new fs.File(fs.Paths.cache, `denoised_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.wav`);
   try {
-    const outputFile = new fs.File(
-      fs.Paths.cache,
-      `denoised_${Date.now()}.wav`,
-    );
-
-    // Use native pcmToWav to avoid loading entire file into memory as base64.
-    // Pass null (never undefined) when trim is disabled so the bridge reliably
-    // maps it to a missing map on the native side.
-    const result = await nativePcmToWav(
-      file.uri,
-      outputFile.uri,
-      sampleRate,
-      1, // channels (mono)
-      16, // bitDepth (16-bit)
-      silenceTrim && silenceTrim.enabled ? trimToNativeConfig(silenceTrim) : null,
-    );
-
-    return {
-      file: outputFile,
-      trimStartUs: result.trimStartUs,
-      trimEndUs: result.trimEndUs,
-      trimmed: result.trimmed,
-    };
+    const result = await nativePcmToWav(file.uri, outputFile.uri, sampleRate, 1, 16,
+      silenceTrim && silenceTrim.enabled ? trimToNativeConfig(silenceTrim) : null);
+    return { file: outputFile, trimStartUs: result.trimStartUs, trimEndUs: result.trimEndUs, trimmed: result.trimmed };
   } catch (error) {
-    console.error("Failed to wrap PCM in WAV.", error);
-    throw new Error(
-      `WAV wrapping failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    try { if (outputFile.exists) outputFile.delete(); } catch { /* best effort */ }
+    throw new Error(`WAV wrapping failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-/**
- * Resamples an Int16Array or Float32Array from inputRate to outputRate using linear interpolation.
- */
+/** Resample one complete buffer using the same streaming engine as file processing. */
 export function resample(
   input: Int16Array | Float32Array,
   inputRate: number,
-  outputRate: number
+  outputRate: number,
 ): Float32Array {
-  if (inputRate === outputRate) {
-    if (input instanceof Float32Array) return input;
-    const output = new Float32Array(input.length);
-    for (let i = 0; i < input.length; i++) output[i] = input[i] / 32768.0;
-    return output;
-  }
-
-  const ratio = inputRate / outputRate;
-  const outputLength = Math.round(input.length / ratio);
-  const output = new Float32Array(outputLength);
-
-  const isInt16 = input instanceof Int16Array;
-
-  for (let i = 0; i < outputLength; i++) {
-    const pos = i * ratio;
-    const index = Math.floor(pos);
-    const fraction = pos - index;
-
-    let s1, s2;
-    if (isInt16) {
-      s1 = input[index] / 32768.0;
-      s2 = index + 1 < input.length ? input[index + 1] / 32768.0 : s1;
-    } else {
-      s1 = input[index];
-      s2 = index + 1 < input.length ? input[index + 1] : s1;
-    }
-
-    output[i] = s1 * (1 - fraction) + s2 * fraction;
-  }
-
-  return output;
+  const resampler = new StreamingResampler(inputRate, outputRate);
+  const body = resampler.push(input);
+  const tail = resampler.finish();
+  const result = new Float32Array(body.length + tail.length);
+  result.set(body);
+  result.set(tail, body.length);
+  return result;
 }
 
 export async function PCMtoArray(
@@ -209,33 +163,32 @@ export async function readPCMChunks(
   chunkSize: number, // in samples
   onChunk: (chunk: Float32Array, inputSamples: number) => Promise<void>,
   inputRate?: number,
-  targetRate?: number
+  targetRate?: number,
 ): Promise<void> {
   if (!file.exists) throw new Error("File does not exist");
-
   const fileSize = file.size;
+  if (fileSize % 2 !== 0) throw new Error("Invalid 16-bit PCM byte length.");
+  const resampler = inputRate && targetRate && inputRate !== targetRate
+    ? new StreamingResampler(inputRate, targetRate) : null;
   const handle = file.open();
   try {
     const bytesPerChunk = chunkSize * 2;
     for (let offset = 0; offset < fileSize; offset += bytesPerChunk) {
       const length = Math.min(bytesPerChunk, fileSize - offset);
-      const inputSamples = length / 2;
       handle.offset = offset;
       const bytes = handle.readBytes(length);
       const pcmChunk = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-
       let floatChunk: Float32Array;
-      if (inputRate && targetRate && inputRate !== targetRate) {
-        floatChunk = resample(pcmChunk, inputRate, targetRate);
+      if (resampler) {
+        floatChunk = resampler.push(pcmChunk);
       } else {
         floatChunk = new Float32Array(pcmChunk.length);
-        for (let i = 0; i < pcmChunk.length; i++) {
-          floatChunk[i] = pcmChunk[i] / 32768.0;
-        }
+        for (let i = 0; i < pcmChunk.length; i++) floatChunk[i] = pcmChunk[i] / 32768;
       }
-
-      await onChunk(floatChunk, inputSamples);
+      await onChunk(floatChunk, pcmChunk.length);
     }
+    const tail = resampler?.finish();
+    if (tail && tail.length) await onChunk(tail, 0);
   } finally {
     handle.close();
   }
@@ -257,7 +210,7 @@ export async function writePCMChunk(
   // Write raw little-endian PCM bytes directly. The new expo-file-system
   // API writes Uint8Array without encoding, so we skip the base64 string
   // building that previously dominated the recording hot path.
-  file.write(new Uint8Array(pcmChunk.buffer), { append });
+  await file.write(new Uint8Array(pcmChunk.buffer), { append });
 }
 
 export async function ArraytoPCM(f32array: Float32Array): Promise<fs.File> {
@@ -316,32 +269,24 @@ export async function mergeAudioVideo(
   audio: fs.File,
   trim?: { startUs: number; endUs: number; trimmed: boolean },
 ): Promise<fs.File> {
+  const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const transcodedAudio = new fs.File(fs.Paths.cache, `denoised_${id}.m4a`);
+  const outputFile = new fs.File(fs.Paths.cache, `denoised_${id}.mp4`);
+  let success = false;
   try {
-    // Transcode the denoised WAV to AAC first, as MediaMuxer (MP4) often doesn't support PCM.
-    const transcodedAudio = new fs.File(fs.Paths.cache, `denoised_${Date.now()}.m4a`);
-    await extractAndTranscodeAudio(
-      audio.uri,
-      transcodedAudio.uri.replace('file://', ''),
-      128000, // 128kbps AAC
-    );
-
-    const outputFile = new fs.File(fs.Paths.cache, `denoised_${Date.now()}.mp4`);
-    await mixAudioVideo(
-      video.uri,
-      transcodedAudio.uri,
-      outputFile.uri.replace('file://', ''),
-      trim && trim.trimmed
-        ? { enabled: true, startUs: trim.startUs, endUs: trim.endUs }
-        : undefined,
-    );
+    await extractAndTranscodeAudio(audio.uri, transcodedAudio.uri.replace("file://", ""), 128000);
+    await mixAudioVideo(video.uri, transcodedAudio.uri, outputFile.uri.replace("file://", ""),
+      trim && trim.trimmed ? { enabled: true, startUs: trim.startUs, endUs: trim.endUs } : undefined);
+    success = true;
     return outputFile;
   } catch (error) {
-    console.error("Failed to merge audio and video.", error);
-    throw new Error(
-      `Merge failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    try { if (transcodedAudio.exists) transcodedAudio.delete(); } catch { /* best effort */ }
+    if (!success) try { if (outputFile.exists) outputFile.delete(); } catch { /* best effort */ }
   }
 }
+
 export function sanitizeFileName(name: string): string {
   return name
     .replaceAll(ILLEGAL_FS_CHARS, '_')

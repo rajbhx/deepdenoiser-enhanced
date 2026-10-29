@@ -43,7 +43,7 @@ export default function ErrorModal({ visible, error, onClose }: ErrorModalProps)
     if (msg.includes("illegal character") || stack.includes("illegal character")) {
       return {
         title: "Illegal Character in Filename",
-        description: "rename the file with a valid filename without any ascii symbols",
+        description: "Rename the file using letters, numbers, dots, underscores, or hyphens.",
         icon: "file" as const,
       };
     }
@@ -93,7 +93,7 @@ export default function ErrorModal({ visible, error, onClose }: ErrorModalProps)
       `**Stack Trace:** (Paste Error Details)\n\n` +
       `**Device Info:**\n(Please add your device model,RAM size and OS version here)`
     );
-    const url = `https://github.com/sayampy/deepdenoiser/issues/new?title=${title}&body=${body}`;
+    const url = `https://github.com/rajbhx/deepdenoiser-enhanced/issues/new?title=${title}&body=${body}`;
     Linking.openURL(url);
   };
 
