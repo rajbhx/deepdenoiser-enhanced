@@ -1,5 +1,5 @@
 import * as theme from "@/src/constants/theme";
-import { Feather } from "@expo/vector-icons";
+import Feather from "@expo/vector-icons/Feather";
 import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
 import React, { useEffect, useState } from "react";

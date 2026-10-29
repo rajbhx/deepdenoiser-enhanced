@@ -8,6 +8,9 @@ export interface StreamState {
     stateBuffers: Float32Array[];
     attenLimDb: Tensor;
     attenLimDbData: Float32Array;
+    /** Cached dry/wet coefficient; keyed to the actual float32 strength value. */
+    wetMixAttenDb: number | null;
+    wetMix: number;
     inputFrameData: Float32Array;
     inputFrame: Tensor;
     /** Stable tensor maps are owned by this stream and never shared with other streams. */
@@ -55,6 +58,8 @@ export class DeepFilterNet {
             stateBuffers,
             attenLimDb,
             attenLimDbData,
+            wetMixAttenDb: null,
+            wetMix: 1,
             inputFrameData,
             inputFrame,
             feeds,
@@ -270,8 +275,12 @@ export class DeepFilterNet {
             if (!Number.isFinite(sample)) throw new Error("Input audio contains a non-finite sample");
         }
 
-        // Clear the tail so a short final frame never replays stale samples (AUD-15).
-        inputFrameData.fill(0);
+        // Full, non-aliasing frames overwrite every sample. Short frames must
+        // clear the tail (AUD-15); preserve the previous clear-first behavior
+        // for any unusual caller supplying a view of this same backing buffer.
+        if (frame.length < this.hopSize || frame.buffer === inputFrameData.buffer) {
+            inputFrameData.fill(0);
+        }
         inputFrameData.set(frame);
 
         const results = await this.runFrame(state);
@@ -308,7 +317,14 @@ export class DeepFilterNet {
         // a dry signal delayed by exactly the model's measured latency.
         const output = dest ?? new Float32Array(this.hopSize);
         const nativeStrength = this.inputNames.includes("atten_lim_db");
-        const wet = nativeStrength ? 1 : Math.pow(10, -state.attenLimDbData[0] / 20);
+        const attenuation = state.attenLimDbData[0];
+        if (!nativeStrength && state.wetMixAttenDb !== attenuation) {
+            // Use the stored float32 value, exactly as before. A direct
+            // mutation by a caller also invalidates this per-stream cache.
+            state.wetMix = Math.pow(10, -attenuation / 20);
+            state.wetMixAttenDb = attenuation;
+        }
+        const wet = nativeStrength ? 1 : state.wetMix;
         for (let i = 0; i < this.hopSize; i++) {
             let dry = inputFrameData[i];
             if (state.dryDelay.length) {

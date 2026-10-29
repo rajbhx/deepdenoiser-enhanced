@@ -1,5 +1,5 @@
 import * as theme from "@/src/constants/theme";
-import { Feather } from "@expo/vector-icons";
+import Feather from "@expo/vector-icons/Feather";
 import * as Linking from "expo-linking";
 import { useRouter } from "expo-router";
 import { Image } from "expo-image";

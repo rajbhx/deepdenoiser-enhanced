@@ -1,4 +1,4 @@
-import { Feather } from "@expo/vector-icons";
+import Feather from "@expo/vector-icons/Feather";
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";

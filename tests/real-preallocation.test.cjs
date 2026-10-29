@@ -1,5 +1,5 @@
-/* Real bundled ONNX CPU model: compare conventional results with the reusable
- * tensor path. Node ORT writes to provided tensors but returns copied Tensor
+/* Real bundled ONNX CPU model: compare the exact 2.0.3 reference implementation
+ * with the new reusable-tensor path. Node ORT writes to provided tensors but returns copied Tensor
  * wrappers; the small adapter below verifies the bytes and returns the supplied
  * tensors, as the inspected React Native binding does. This is not a device
  * test and does not certify Android provider/driver behavior. */
@@ -10,8 +10,8 @@ const Module = require('node:module');
 const ts = require('typescript');
 const ort = require('onnxruntime-node');
 const metadata = require('../assets/model/model_metadata.json');
-function load(name, stubs = {}) {
-  const filename = path.join(__dirname, '../src/scripts', name + '.ts');
+function load(name, stubs = {}, filenameOverride) {
+  const filename = filenameOverride || path.join(__dirname, '../src/scripts', name + '.ts');
   const js = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
@@ -40,12 +40,12 @@ const rnLikeOrt = { Tensor: ort.Tensor, InferenceSession: { create: async (...ar
     release: () => session.release(),
   };
 } } };
-function makeModel(runtime) {
+function makeModel(runtime, use203Reference = false) {
   const { DeepFilterNet } = load('Denoiser', {
     '@/assets/model/model_metadata.json': metadata,
     'onnxruntime-react-native': runtime,
     './alignedDenoiseStream': aligned,
-  });
+  }, use203Reference ? path.join(__dirname, 'fixtures/Denoiser-2.0.3-reference.txt') : undefined);
   return new DeepFilterNet();
 }
 function bytes(array) { return Buffer.from(array.buffer, array.byteOffset, array.byteLength); }
@@ -65,7 +65,7 @@ async function run(model, input, strength, sizes) {
   return { result, state };
 }
 (async () => {
-  const standard = makeModel(ort), reused = makeModel(rnLikeOrt);
+  const standard = makeModel(ort, true), reused = makeModel(rnLikeOrt);
   const modelPath = path.join(__dirname, '../assets/model/denoiser_model.ort');
   await standard.loadModel(modelPath, 'cpu', 4); await reused.loadModel(modelPath, 'cpu', 4);
   const signal = Float32Array.from({length: 48000 * 2 + 17}, (_, i) =>
