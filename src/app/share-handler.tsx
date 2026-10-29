@@ -2,6 +2,7 @@ import * as theme from "@/src/constants/theme";
 import ErrorModal from "@/src/components/ErrorModal";
 import { importToDocuments } from "@/src/scripts/denoiseCache";
 import { claimSharedFile, finishSharedFile } from "@/src/scripts/shareClaim";
+import { mediaKind } from "@/src/scripts/mediaSelection";
 import { useRouter } from "expo-router";
 import { useIncomingShare } from "expo-sharing";
 import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
@@ -47,6 +48,11 @@ export default function ShareHandler() {
                 params: {
                   fileuri: encodeURIComponent(imported.uri),
                   filename: encodeURIComponent(payload.originalName || "shared_file"),
+                  batch: encodeURIComponent(JSON.stringify([{
+                    uri: imported.uri,
+                    name: payload.originalName || "shared_file",
+                    kind: mediaKind(payload.originalName || "shared_file", payload.contentMimeType ?? payload.mimeType),
+                  }])),
                 },
               });
 

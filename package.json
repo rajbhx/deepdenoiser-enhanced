@@ -16,7 +16,7 @@
     "postinstall": "patch-package",
     "typecheck": "tsc --noEmit",
     "test:document-picker": "node tests/documentPicker.test.cjs",
-    "test": "node tests/documentPicker.test.cjs && node tests/resampler.test.cjs && node tests/queue-and-compare.test.cjs && node tests/storage-and-processing.test.cjs && node tests/settings-and-model.test.cjs"
+    "test": "node tests/documentPicker.test.cjs && node tests/resampler.test.cjs && node tests/queue-and-compare.test.cjs && node tests/storage-and-processing.test.cjs && node tests/settings-and-model.test.cjs && node tests/pipeline.test.cjs"
   },
   "dependencies": {
     "@expo/ui": "~57.0.11",

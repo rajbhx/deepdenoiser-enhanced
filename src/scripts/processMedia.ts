@@ -18,10 +18,6 @@ export type ProcessingSettings = {
 export type ProcessingProgress = { stage: string; percent: number; eta: string | null };
 export type ProcessingResult = { file: fs.File; seconds: number; cached: boolean; trimEnabled: boolean };
 
-export function isVideoFile(file: fs.File, name: string): boolean {
-  return !!file.type?.startsWith("video") || /\.(mp4|mov|mkv|avi|m4v|webm)$/i.test(name);
-}
-
 function remainingTime(seconds: number): string {
   const n = Math.max(0, Math.ceil(seconds));
   if (n >= 3600) return `${Math.floor(n / 3600)}h ${Math.floor((n % 3600) / 60)}m left`;

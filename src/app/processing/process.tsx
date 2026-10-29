@@ -201,7 +201,7 @@ export default function ProcessScreen() {
           {current.kind === "video" ? <VideoPlayer key={output.uri} uri={output.uri} name={output.name} />
             : current.trimEnabled ? <><Text style={styles.helper}>Silence trimming changes the timeline, so synchronized comparison is unavailable.</Text><AudioPlayer key={output.uri} uri={output.uri} name={output.name} /></>
               : <CompareAudioPlayer key={`${current.uri}|${output.uri}`} originalUri={current.uri} cleanedUri={output.uri} />}
-          <View style={styles.resultActions}><SaveButton file={output} label="Save to device" style={styles.saveButton} onError={(err) => { setError(err); setShowError(true); }} />
+          <View style={styles.resultActions}><SaveButton key={output.uri} file={output} label="Save to device" style={styles.saveButton} onError={(err) => { setError(err); setShowError(true); }} />
             <View style={styles.shareButton}><ShareBtn uri={output.uri} /></View></View>
         </View>}
       </ScrollView>

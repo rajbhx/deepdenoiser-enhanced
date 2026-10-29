@@ -40,12 +40,15 @@ export default function HomeScreen() {
       let success = false;
       try {
         setLoadingLabel("Preparing shared file…"); setIsLoading(true);
-        const imported = await importToDocuments(uri, payload.originalName ?? "shared_file", payload.value);
+        const name = payload.originalName ?? "shared_file";
+        const imported = await importToDocuments(uri, name, payload.value);
+        const selection: SelectedMedia[] = [{ uri: imported.uri, name, kind: mediaKind(name, payload.contentMimeType ?? payload.mimeType) }];
         clearSharedPayloads();
         success = true;
         router.push({ pathname: "/processing/process", params: {
           fileuri: encodeURIComponent(imported.uri),
-          filename: encodeURIComponent(payload.originalName ?? "shared_file"),
+          filename: encodeURIComponent(name),
+          batch: encodeURIComponent(JSON.stringify(selection)),
         } });
       } catch (copyError) {
         clearSharedPayloads();
