@@ -1,36 +1,44 @@
 --- a/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioRecorderManager.kt
 +++ b/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioRecorderManager.kt
-@@ -227,3 +227,3 @@
+@@ -88,2 +88,3 @@
+     private var recordingThread: Thread? = null
++    @Volatile private var recordingThreadError: Exception? = null
+     private var recordingStartTime: Long = 0
+@@ -227,3 +228,3 @@
                  }
 -                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                override fun reject(code: String?, message: String?, cause: Throwable?) {
                      LogUtils.e(CLASS_NAME, "🔄 Failed to reinitialize AudioRecord: $message")
-@@ -239,3 +239,3 @@
+@@ -239,3 +240,3 @@
                      }
 -                    override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                    override fun reject(code: String?, message: String?, cause: Throwable?) {}
                  })
-@@ -255,3 +255,3 @@
+@@ -255,3 +256,3 @@
                          }
 -                        override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                        override fun reject(code: String?, message: String?, cause: Throwable?) {}
                      })
-@@ -299,3 +299,3 @@
+@@ -299,3 +300,3 @@
                  }
 -                override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                override fun reject(code: String?, message: String?, cause: Throwable?) {}
              })
-@@ -419,3 +419,3 @@
+@@ -419,3 +420,3 @@
                              }
 -                            override fun reject(code: String, message: String?, cause: Throwable?) {
 +                            override fun reject(code: String?, message: String?, cause: Throwable?) {
                                  LogUtils.e(CLASS_NAME, "Failed to pause recording on phone call", cause)
-@@ -446,3 +446,3 @@
+@@ -446,3 +447,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording after phone call", cause)
-@@ -1036,1 +1036,7 @@
+@@ -894,2 +895,3 @@
+             streamUuid = java.util.UUID.randomUUID().toString()
++            recordingThreadError = null
+             totalDataSize = 0
+@@ -1036,1 +1038,7 @@
                  recordingThread?.join(timeoutMs)
 +                if (recordingThread?.isAlive == true) {
 +                    // Do not claim a complete WAV while its writer is still open.
@@ -38,12 +46,25 @@
 +                    promise.reject("STOP_TIMEOUT", "Recording thread did not stop; the original file was kept", null)
 +                    return
 +                }
-@@ -1228,3 +1234,3 @@
+@@ -1082,5 +1090,12 @@
+                 val cleanupStartTime = System.currentTimeMillis()
++                val threadFailure = recordingThreadError
+                 cleanup()
++                if (threadFailure != null) {
++                    promise.reject("RECORDING_FAILED", "Recording ended early; the original file was kept", threadFailure)
++                    return
++                }
+             } catch (e: IllegalStateException) {
+                 LogUtils.e(CLASS_NAME, "Error reading from AudioRecord", e)
++                promise.reject("RECORDING_FAILED", "Recording could not stop cleanly; the original file was kept", e)
++                return
+             } finally {
+@@ -1228,3 +1243,3 @@
                      }
 -                    override fun reject(code: String, message: String?, cause: Throwable?) {
 +                    override fun reject(code: String?, message: String?, cause: Throwable?) {
                          LogUtils.e(CLASS_NAME, "⏺️ Failed to reinitialize AudioRecord: $message")
-@@ -1475,12 +1481,16 @@
+@@ -1475,12 +1490,16 @@
                  val accumulatedAnalysisData = ByteArrayOutputStream()  // Separate buffer for analysis
 -                audioFileHandler.writeWavHeader(
 -                    accumulatedAudioData!!,
@@ -71,7 +92,7 @@
 +                        }
 +                    )
 +                }
-@@ -1519,14 +1529,14 @@
+@@ -1519,16 +1538,19 @@
 -                    val bytesRead = synchronized(audioRecordLock) {
 -                        audioRecord?.let {
 -                            if (it.state != AudioRecord.STATE_INITIALIZED) {
@@ -97,29 +118,41 @@
 -                            }
 -                        } ?: -1 // Handle null case
 -                    }
+-
 +                        }
 +                    } ?: -1
-@@ -1938,3 +1948,3 @@
++
++                    if (bytesRead < 0) {
++                        throw IllegalStateException("AudioRecord read failed: $bytesRead")
++                    }
+                     if (bytesRead > 0) {
+@@ -1633,2 +1655,5 @@
+         } catch (e: Exception) {
++            // Surface early read/write/close failures when Stop joins this worker.
++            // Its partial WAV stays on disk for recovery; never report it complete.
++            recordingThreadError = e
+             // Ensure wake lock is released if the thread is interrupted
+@@ -1938,3 +1963,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to pause recording on audio focus loss")
-@@ -1961,3 +1971,3 @@
+@@ -1961,3 +1986,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording on audio focus gain")
-@@ -2008,3 +2018,3 @@
+@@ -2008,3 +2033,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to pause recording on audio focus loss")
-@@ -2035,3 +2045,3 @@
+@@ -2035,3 +2060,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording on audio focus gain")
-@@ -2141,3 +2151,3 @@
+@@ -2141,3 +2166,3 @@
                  override fun resolve(value: Any?) {}
 -                override fun reject(code: String, message: String?, cause: Throwable?) { 
 +                override fun reject(code: String?, message: String?, cause: Throwable?) { 

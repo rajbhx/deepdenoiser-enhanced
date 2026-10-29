@@ -7,9 +7,13 @@ const stop = recorder.slice(recorder.indexOf('fun stopRecording(promise: Promise
 assert.ok(stop.indexOf('recordingThread?.join(timeoutMs)') >= 0);
 assert.ok(stop.indexOf('recordingThread?.join(timeoutMs)') < stop.indexOf('recordingThread?.isAlive == true'), 'check must run AFTER join, not before');
 assert.ok(stop.indexOf('recordingThread?.isAlive == true') < stop.indexOf('Emitting final accumulated audio chunk'), 'never finalize while writer is alive');
+assert.ok(stop.indexOf('val threadFailure = recordingThreadError') > stop.indexOf('recordingThread?.join(timeoutMs)'));
+assert.match(stop,/promise\.reject\("RECORDING_FAILED"/);
 const recordingLoop=recorder.slice(recorder.indexOf('private fun recordingProcess()'),recorder.indexOf('private fun emitAudioData('));
 assert.match(recordingLoop,/if \(recordingConfig\.streamFormat != "float32"\)\s*\{\s*audioFileHandler\.writeWavHeader/);
 assert.doesNotMatch(recordingLoop,/val bytesRead = synchronized\(audioRecordLock\)/);
+assert.match(recordingLoop,/throw IllegalStateException\("AudioRecord read failed/);
+assert.match(recordingLoop,/recordingThreadError = e/);
 const config=fs.readFileSync(path.join(root,'node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/RecordingConfig.kt'),'utf8');
 assert.doesNotMatch(config,/\.trim\('\/'\)/, 'recording directory must remain an absolute path');
 assert.equal((config.match(/\.trimEnd\('\/'\)/g)||[]).length, 2);

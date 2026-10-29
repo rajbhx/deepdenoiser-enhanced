@@ -81,7 +81,7 @@ export default function HistoryScreen() {
       } },
     ]);
   };
-  const useInput = (item: PrivateMedia) => {
+  const selectAsInput = (item: PrivateMedia) => {
     const selection: SelectedMedia[] = [{ uri: item.file.uri, name: item.name, kind: mediaKind(item.name) }];
     router.push({ pathname: "/processing/process", params: {
       fileuri: encodeURIComponent(item.file.uri), filename: encodeURIComponent(item.name),
@@ -130,7 +130,7 @@ export default function HistoryScreen() {
               </TouchableOpacity>}
               {canExport && <SaveButton file={item.file} label="Save" style={[theme.Styles.button, styles.save]}
                 onError={error => Alert.alert("Could not save", error.message)} />}
-              {item.group !== "results" && !item.partial && <TouchableOpacity onPress={() => useInput(item)} style={styles.action}>
+              {item.group !== "results" && !item.partial && <TouchableOpacity onPress={() => selectAsInput(item)} style={styles.action}>
                 <Feather name="zap" size={17} color={theme.COLORS.primary} /><Text style={styles.actionText}>Denoise</Text>
               </TouchableOpacity>}
               {!item.partial && <ShareBtn uri={item.file.uri} />}
