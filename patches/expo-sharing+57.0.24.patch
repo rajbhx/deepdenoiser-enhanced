@@ -1,0 +1,146 @@
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntentQueue.java b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntentQueue.java
+new file mode 100644
+index 0000000..21bff78
+--- /dev/null
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntentQueue.java
+@@ -0,0 +1,40 @@
++package expo.modules.sharing;
++
++import java.util.ArrayDeque;
++
++/** Bounded FIFO whose generation makes compare-and-ack safe for identical shares. */
++public final class ShareIntentQueue<T> {
++  public static final class Item<T> {
++    public final String generation;
++    public final T payload;
++    Item(String generation, T payload) { this.generation = generation; this.payload = payload; }
++  }
++  private final int capacity;
++  private final ArrayDeque<Item<T>> items = new ArrayDeque<>();
++  private long nextGeneration = 0L;
++  private int rejected = 0;
++
++  public ShareIntentQueue(int capacity) {
++    if (capacity <= 0) throw new IllegalArgumentException("capacity must be positive");
++    this.capacity = capacity;
++  }
++  public synchronized boolean offer(T payload) {
++    if (payload == null) throw new IllegalArgumentException("payload is required");
++    if (items.size() >= capacity) { if (rejected < Integer.MAX_VALUE) rejected++; return false; }
++    items.addLast(new Item<>(Long.toString(++nextGeneration), payload));
++    return true;
++  }
++  public synchronized Item<T> peek() { return items.peekFirst(); }
++  public synchronized boolean acknowledge(String generation) {
++    Item<T> head = items.peekFirst();
++    if (head == null || generation == null || !head.generation.equals(generation)) return false;
++    items.removeFirst();
++    return true;
++  }
++  public synchronized int takeRejectedWhenEmpty() {
++    if (!items.isEmpty()) return 0;
++    int count = rejected;
++    rejected = 0;
++    return count;
++  }
++}
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntoUtils.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntoUtils.kt
+index 041daea..4c317eb 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntoUtils.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntoUtils.kt
+@@ -32,7 +32,7 @@ internal fun getShareIntentUri(context: Context): Uri? {
+ // Emits intent received event to JS. This is because the `SEND` and `SEND_MULTIPLE` intents
+ // do not navigation libraries of a native intent. This aligns the behaviour with ios.
+ internal fun emitShareIntentReceived(reactActivity: ReactActivity, originalIntent: Intent) {
+-  SharingSingleton.intent = originalIntent
++  SharingSingleton.enqueue(originalIntent)
+
+   val currentContext = reactActivity.reactDelegate?.reactHost?.currentReactContext
+   val deviceEventManagerModule =
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt
+index 69ccba6..84120e6 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt
+@@ -58,7 +58,7 @@ class SharingModule : Module() {
+     }
+
+     Function("getSharedPayloads") {
+-      val intent = SharingSingleton.intent
++      val intent = SharingSingleton.currentIntent()
+       if (intent == null) {
+         return@Function emptyList<SharePayload>()
+       }
+@@ -66,15 +66,20 @@ class SharingModule : Module() {
+     }
+
+     AsyncFunction("getResolvedSharedPayloadsAsync") {
+-      val intent = SharingSingleton.intent
++      val intent = SharingSingleton.currentIntent()
+       if (intent == null) {
+         return@AsyncFunction emptyList<ResolvedSharePayload>()
+       }
+       return@AsyncFunction ResolvingShareIntentDataParser.parse(context, intent)
+     }
+
++    // Generation and compare-and-ack keep two identical intents distinct.
++    Function("getShareIntentGeneration") { SharingSingleton.currentGeneration() }
++    Function("acknowledgeShareIntent") { generation: String -> SharingSingleton.acknowledge(generation) }
++    Function("takeShareQueueOverflow") { SharingSingleton.takeRejectedWhenEmpty() }
++
+     Function("clearSharedPayloads") {
+-      SharingSingleton.intent = null
++      SharingSingleton.acknowledge(SharingSingleton.currentGeneration())
+     }
+
+     OnActivityResult { _, (requestCode) ->
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingReactActivityLifecycleListener.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingReactActivityLifecycleListener.kt
+index 905790a..7d0706e 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingReactActivityLifecycleListener.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingReactActivityLifecycleListener.kt
+@@ -20,7 +20,7 @@ class SharingReactActivityLifecycleListener(activityContext: Context) :
+
+   override fun onCreate(activity: Activity?, misavedInstanceState: Bundle?) {
+     if (activity?.intent != null && isShareIntent(activity.intent)) {
+-      SharingSingleton.intent = Intent(activity.intent)
++      SharingSingleton.enqueue(activity.intent)
+
+       getShareIntentUri(activity)?.let { uri ->
+         // Navigation handlers will ignore the intent data if the action is different than ACTION_VIEW
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingSingleton.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingSingleton.kt
+index 86b1f16..fd5f201 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingSingleton.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingSingleton.kt
+@@ -3,5 +3,12 @@ package expo.modules.sharing
+ import android.content.Intent
+
+ object SharingSingleton {
+-  var intent: Intent? = null
++  // Intents are bounded but never conflated by URI. Report overflow to JS after
++  // the queued items are handled so the user can re-share rejected requests.
++  private val queue = ShareIntentQueue<Intent>(32)
++  fun enqueue(intent: Intent): Boolean = queue.offer(Intent(intent))
++  fun currentIntent(): Intent? = queue.peek()?.payload
++  fun currentGeneration(): String = queue.peek()?.generation ?: ""
++  fun acknowledge(generation: String): Boolean = queue.acknowledge(generation)
++  fun takeRejectedWhenEmpty(): Int = queue.takeRejectedWhenEmpty()
+ }
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt
+index 8dd50e8..499630a 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt
+@@ -35,8 +35,13 @@ internal class SimpleShareIntentDataParser {
+     }
+
+     private fun handleSendMultipleAction(context: Context, intent: Intent, type: String): List<SharePayload> {
+-      val uris = intent.getParcelableArrayListExtraCompat<Uri>(Intent.EXTRA_STREAM)
+-      return uris?.map { createUriPayload(context, it, type) } ?: emptyList()
++      val uris = intent.getParcelableArrayListExtraCompat<Uri>(Intent.EXTRA_STREAM) ?: return emptyList()
++      // Enforce limits before querying providers. Keep aligned with the app's
++      // 20-unique-file batch limit and preserve duplicate shares as intents.
++      if (uris.size > 200) throw IllegalArgumentException("Too many shared items; please share a smaller batch")
++      val unique = uris.distinctBy { it.toString() }
++      if (unique.size > 20) throw IllegalArgumentException("A batch can contain up to 20 unique files")
++      return unique.map { createUriPayload(context, it, type) }
+     }
+
+     private fun createUriPayload(context: Context, uri: Uri, defaultType: String): SharePayload {

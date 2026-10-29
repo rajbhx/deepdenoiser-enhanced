@@ -18,9 +18,23 @@ Offline AI audio and video denoising for Android using **DeepFilterNet3** and **
 - **Privacy:** processing is on-device. Microphone and media-library permissions are requested only when needed; the app has no configured analytics.
 - **Target:** Android 8+ (API 26), arm64-v8a.
 
-**Batch processing runs while the app is open.** It is not a background service and does not resume automatically after the app is killed. Pressing Stop waits for any current Android decode/export step to return. Private app files can be removed by clearing app data or uninstalling; save the results to your device first.
+**Batch processing runs while the app is open.** It is not a background service and does not resume automatically after the app is killed. Pressing Stop waits for any current Android decode/export step to return. The incoming-share queue is bounded and held in memory; an app process death can lose queued shares, so share them again if necessary. Private app files can be removed by clearing app data or uninstalling; save the results to your device first.
 
-Existing features include DeepFilterNet3, live microphone recording, strength presets, loudness normalization, optional silence trimming for audio, video audio replacement, runtime/core controls, progress and ETA. Video results use separate players, and silence trim is disabled for video or mixed batches.
+**Recording:** the existing background-recording configuration is retained. The recorder attempts an Android microphone foreground service with a recording notification and a wake lock. OS restrictions, notification permission/settings, service startup failures, battery policies and process death can affect behavior; continuous background recording is not guaranteed. Test the actual notification, interruptions and recovery on target devices.
+
+**Privacy and backup:** media is processed on-device rather than sent to a denoising server. Android Auto Backup or device-to-device transfer may include eligible private app files depending on device and user settings; cache files are generally excluded. Saving or sharing intentionally sends a copy outside the app. This change does not silently disable or alter existing backup policy.
+
+Existing features include DeepFilterNet3, microphone recording with processing during capture, strength presets, pre-denoise gain, optional silence trimming for audio, video audio replacement, runtime/core controls, progress and ETA. Video results use separate players, and silence trim is disabled for video or mixed batches.
+
+Output audio is 48 kHz mono, including downmixed multichannel inputs. Video output contains one video track and the cleaned audio; subtitles, additional tracks and some metadata may be omitted, and unsupported video may be re-encoded at 30 fps. Keep the originals and inspect results. Silence trimming can remove quiet speech or meaningful pauses. For the bundled model, strength mixes aligned cleaned/original signals rather than guaranteeing a measured dB of noise removal: 0 dB is 100% cleaned, 20 dB approximately 10%, and 40 dB approximately 1%.
+
+Working audio can require substantial free space: one mono 48 kHz PCM16 stream is about 330 MiB per hour, so decoded and denoised stages together can need about 659 MiB per hour before the source and outputs. Rebuildable PCM is pruned when idle; originals and finished media are not. Standard WAV's 32-bit data limit is about 12 hours 25 minutes for mono 48 kHz PCM16. These are estimates, not guarantees of available space.
+
+## Recovery and file management
+
+- If recording stops with an uncertain native-writer status, use **Check recorder status**. The app only permits recovery after confirming the writer is idle. If it cannot confirm this, force-stop and reopen the app, then inspect **Your files**. Do not uninstall or clear app data before saving any recording you need.
+- Older imported files may need an explicit **Audio** or **Video** choice in **Your files → Imports**. The type can be corrected later; new imports remember it. Reusable decoded/denoised PCM is shown separately in **Your files** and can be cleared without deleting imports, recordings, partial backups or finished results. Android can independently evict cache files, including partial backups, so recover them promptly.
+- A share or picker batch accepts up to 20 unique files. Android may offer the app for mixed multiple shares, but non-audio/video items are rejected rather than silently discarded. Saved WAV and MP4 files go to the corresponding **Music** or **Movies** DeepDenoiser folder.
 
 ## Build and test
 
@@ -36,7 +50,7 @@ cd android && ./gradlew assembleRelease
 
 If a previous hard-linked Bun cache causes a patch to fail, remove `node_modules` and reinstall using `--backend=copyfile --cache-dir` pointing to a new, empty directory.
 
-The workflow runs mock regressions, an actual bundled-model CPU test, and a Java atomic-write test; it also verifies native symbols and the signing certificate in the artifact. Without release secrets, the arm64 APK is named `testing-debug-signed` and is **not for production**. Local release builds without a key are unsigned; see [release signing](docs/RELEASE_SIGNING.md). Physical-device testing is still required before release; see [the 2.0 upgrade guide](docs/UPGRADE_2.0.md).
+The workflow runs mock regressions, an actual bundled-model CPU test, Java atomic-write/PCM/share-queue tests, and a reproducible npm notice-inventory check; it also verifies native symbols and the signing certificate in the artifact. Without release secrets, the arm64 APK is named `testing-debug-signed` and is **not for production**. Local release builds without a key are unsigned; see [release signing](docs/RELEASE_SIGNING.md). Physical-device testing is still required before release; see [the 2.0 upgrade guide](docs/UPGRADE_2.0.md).
 
 To run the real-model regression separately on a compatible desktop:
 
@@ -51,4 +65,4 @@ For OnePlus 7 / Snapdragon 855, try **Auto or XNNPACK**, **Auto/4 cores**, and *
 
 ## Credits and license
 
-Original app: [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser); model: DeepFilterNet3. This fork retains the repository's GPL-3.0 license.
+Original app: [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser). This fork retains the repository's GPL-3.0 license. The installed npm dependency graph and available notice texts are shown in the app; regenerate with `node scripts/generate-notices.cjs` after a clean locked install. It is **not** a complete native/model license audit. The exact origin and license of the bundled model weights remain unverified, and native/Gradle notices require review before distribution. See [third-party release review](docs/THIRD_PARTY_REVIEW.md).

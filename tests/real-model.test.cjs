@@ -76,6 +76,7 @@ const cache = {
   buildCacheKey: () => '', buildDecodeKey: () => '', buildDenoiseKey: () => '',
   lookupCachedOutput: async () => null, lookupDecodedPCM: async () => null, lookupDenoisedPCM: async () => null,
   storeCachedOutput: async () => {}, storeDecodedPCM: async () => {}, storeDenoisedPCM: async () => {},
+  pruneRebuildableCache: async () => {},
   stagePcmPath: prefix => `${prefix}_${serial++}.pcm`,
   placeOutput: async (file, name) => {
     const output = new File(work, 'out', `${serial++}_${name}`);

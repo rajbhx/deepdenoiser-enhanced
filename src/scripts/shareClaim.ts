@@ -1,16 +1,22 @@
-// Both the home screen and share-handler can receive the same Android intent.
-// Claim synchronously before either starts an async copy, and briefly suppress
-// duplicate notifications after it is consumed.
+// Both Home and the share-handler can receive an intent. A single in-flight
+// claim serializes batches; release wakes listeners in case a newer intent
+// arrived while the old batch was being copied.
 const inFlight = new Set<string>();
-const completed = new Map<string, number>();
-export function claimSharedFile(uri: string): boolean {
-  const now = Date.now();
-  for (const [key, time] of completed) if (now - time > 5000) completed.delete(key);
-  if (inFlight.has(uri) || completed.has(uri)) return false;
-  inFlight.add(uri);
-  return true;
+const listeners = new Set<() => void>();
+
+export function claimSharedBatch(values: readonly string[]): string | null {
+  const key = JSON.stringify([...values].sort());
+  if (inFlight.size) return null;
+  inFlight.add(key);
+  return key;
 }
-export function finishSharedFile(uri: string, success: boolean): void {
-  inFlight.delete(uri);
-  if (success) completed.set(uri, Date.now());
+
+export function finishSharedBatch(key: string): void {
+  inFlight.delete(key);
+  for (const listener of listeners) listener();
+}
+
+export function onShareClaimReleased(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }

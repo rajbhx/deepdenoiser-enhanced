@@ -79,11 +79,13 @@ const settings = load('settings', {
   });
   const [first, same] = await Promise.all([singleton.getDenoiser(), singleton.getDenoiser()]);
   assert.equal(first, same); assert.equal(count, 1, 'same config must not load two models');
+  const activity=[];const unsubscribe=singleton.subscribeProcessingActivity(()=>activity.push(singleton.isProcessingMedia()));
   singleton.beginRun(); config.runtime = 'nnapi';
   await singleton.resetDenoiser();
   const during = await singleton.getDenoiser();
   assert.equal(during, first); assert.ok(!events.includes('release-start-1'), 'active model must not be released');
-  singleton.endRun();
+  singleton.endRun();unsubscribe();
+  assert.deepEqual(activity,[true,false],'share observers see recording/processing start and finish');
   const after = await singleton.getDenoiser();
   assert.notEqual(after, first); assert.equal(after.runtime, 'nnapi');
   assert.ok(events.indexOf('release-end-1') < events.indexOf('load-2-nnapi'), 'release must finish before new model load');

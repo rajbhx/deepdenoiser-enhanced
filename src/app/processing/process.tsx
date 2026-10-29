@@ -7,7 +7,8 @@ import ShareBtn from "@/src/components/shareBtn";
 import VideoPlayer from "@/src/components/videoPlayer";
 import * as theme from "@/src/constants/theme";
 import { runSequentialQueue, type CancellationToken, type QueueEvent } from "@/src/scripts/batchQueue";
-import { decodeMediaSelection, mediaKind, type SelectedMedia } from "@/src/scripts/mediaSelection";
+import { readImportedMediaKind } from "@/src/scripts/denoiseCache";
+import { decodeMediaSelection, type SelectedMedia } from "@/src/scripts/mediaSelection";
 import { processMedia, type ProcessingProgress, type ProcessingResult, type ProcessingSettings } from "@/src/scripts/processMedia";
 import { ATTEN_PRESET_DB, getSettings, incrementDenoiseCount, updateSettings, type AttenPreset } from "@/src/scripts/settings";
 import { DEFAULT_SILENCE_TRIM, type SilenceTrimSettings } from "@/src/scripts/silenceTrim";
@@ -15,8 +16,9 @@ import Feather from "@expo/vector-icons/Feather";
 import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
 import * as fs from "expo-file-system";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { usePreventRemove } from "expo-router/react-navigation";
 import React, { useEffect, useRef, useState } from "react";
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 type ItemStatus = "waiting" | "working" | "done" | "failed" | "cancelled";
@@ -33,12 +35,15 @@ function decode(value: string | undefined): string {
   try { return decodeURIComponent(value || ""); } catch { return value || ""; }
 }
 function initialQueue(batch: string | undefined, uri: string | undefined, name: string | undefined): QueueItem[] {
-  const selection = batch ? decodeMediaSelection(batch) : [];
+  // A malformed batch must not silently degrade to processing just its first file.
+  if (batch) return decodeMediaSelection(batch).map(file => ({ ...file, status: "waiting" }));
   const fileUri = decode(uri);
   const filename = decode(name);
-  const files = selection.length ? selection : fileUri.startsWith("file:")
-    ? [{ uri: fileUri, name: filename || "shared_file", kind: mediaKind(filename) }] : [];
-  return files.map((file) => ({ ...file, status: "waiting" }));
+  if (!fileUri.startsWith("file:")) return [];
+  try {
+    const kind = readImportedMediaKind(new fs.File(fileUri));
+    return kind ? [{ uri: fileUri, name: filename || "shared_file", kind, status: "waiting" }] : [];
+  } catch { return []; }
 }
 function duration(seconds: number): string {
   const n = Math.max(0, Math.round(seconds));
@@ -60,6 +65,7 @@ export default function ProcessScreen() {
   const [stopping, setStopping] = useState(false);
   const [progress, setProgress] = useState<ProcessingProgress>({ stage: "", percent: 0, eta: null });
   const [attenLimDb, setAttenLimDb] = useState(0);
+  const [settingsReady, setSettingsReady] = useState(false);
   const [silenceTrim, setSilenceTrim] = useState<SilenceTrimSettings>({ ...DEFAULT_SILENCE_TRIM });
   const [normalize, setNormalize] = useState({ toggle: false, targetRMS: -14, maxPeakDb: -1 });
   const [error, setError] = useState<Error | null>(null);
@@ -72,7 +78,9 @@ export default function ProcessScreen() {
     mountedRef.current = true;
     let active = true;
     void getSettings().then((s) => { if (active) setAttenLimDb(s.attenLimDb); })
-      .catch((err) => console.warn("Could not load settings:", err));
+      .catch((err) => {
+        if (active) { setError(new Error(`Could not load saved settings; using the default strength. ${err instanceof Error ? err.message : String(err)}`)); setShowError(true); }
+      }).finally(() => { if (active) setSettingsReady(true); });
     return () => {
       active = false;
       mountedRef.current = false;
@@ -89,7 +97,7 @@ export default function ProcessScreen() {
   };
 
   const run = async () => {
-    if (runningRef.current || !items.length) return;
+    if (runningRef.current || !items.length || !settingsReady) return;
     runningRef.current = true;
     const notDone = items.map((item, index) => ({ item, index })).filter(({ item }) => item.status !== "done");
     const batch = notDone.length ? notDone : items.map((item, index) => ({ item, index }));
@@ -141,6 +149,17 @@ export default function ProcessScreen() {
     setStopping(true);
   };
 
+  usePreventRemove(isProcessing, () => {
+    if (stopping) {
+      Alert.alert("Stopping processing", "Please wait until the current operation has finished safely.");
+      return;
+    }
+    Alert.alert("Processing in progress", "Stop processing before leaving? Finished results are kept.", [
+      { text: "Keep processing", style: "cancel" },
+      { text: "Stop processing", onPress: stop },
+    ]);
+  });
+
   const current = items[selected] ?? items[0];
   const doneCount = items.filter((item) => item.status === "done").length;
   const pendingCount = items.filter((item) => item.status !== "done").length;
@@ -149,7 +168,7 @@ export default function ProcessScreen() {
 
   if (!current) {
     return <SafeAreaView style={[theme.Styles.container, styles.empty]}><Feather name="file" size={36} color={theme.COLORS.subtext} />
-      <Text style={styles.heading}>No media selected</Text><TouchableOpacity style={theme.Styles.button} onPress={() => router.replace("/")}><Text style={theme.Styles.buttonText}>Choose files</Text></TouchableOpacity></SafeAreaView>;
+      <Text style={styles.heading}>No valid media selected</Text><Text style={styles.helper}>For an older import, choose its audio or video type in Your files first.</Text><TouchableOpacity style={theme.Styles.button} onPress={() => router.replace("/")}><Text style={theme.Styles.buttonText}>Choose files</Text></TouchableOpacity></SafeAreaView>;
   }
 
   return (
@@ -163,7 +182,8 @@ export default function ProcessScreen() {
         {items.length > 1 && <View style={styles.card}>
           <View style={styles.cardHeader}><Text style={styles.cardTitle}>QUEUE</Text><Text style={styles.muted}>Tap a file to view it</Text></View>
           {items.map((item, index) => (
-            <TouchableOpacity key={`${item.uri}-${index}`} onPress={() => setSelected(index)} style={[styles.queueRow, selected === index && styles.queueRowActive]}>
+            <TouchableOpacity key={`${item.uri}-${index}`} accessibilityRole="button" accessibilityState={{ selected: selected === index }}
+              accessibilityLabel={`${item.name}, ${item.status}`} onPress={() => setSelected(index)} style={[styles.queueRow, selected === index && styles.queueRowActive]}>
               <View style={[styles.statusDot, item.status === "done" && styles.statusDone, item.status === "failed" && styles.statusFailed, item.status === "working" && styles.statusWorking]} />
               <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.queueName}>{item.name}</Text><Text style={styles.queueStatus}>{item.status === "working" ? "Processing" : item.status === "done" ? "Ready" : item.status === "failed" ? "Failed — tap for details" : item.status === "cancelled" ? "Stopped" : "Waiting"}</Text></View>
               <Feather name={item.status === "done" ? "check-circle" : item.kind === "video" ? "film" : "music"} size={17} color={item.status === "done" ? theme.COLORS.success : theme.COLORS.subtext} />
@@ -179,7 +199,15 @@ export default function ProcessScreen() {
               : <AudioPlayer key={current.uri} uri={current.uri} name={current.name} />}
         </View>
 
-        <View pointerEvents={isProcessing ? "none" : "auto"} style={isProcessing ? styles.disabled : undefined}>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>BEFORE YOU PROCESS</Text>
+          <Text style={styles.helper}>Output audio is 48 kHz mono. Keep the original file.</Text>
+          {hasVideo && <Text style={styles.helper}>Video output contains one video track and the cleaned audio. Subtitles, extra tracks and some metadata may be omitted; unsupported video may be re-encoded at 30 fps.</Text>}
+        </View>
+        {!settingsReady && <Text accessibilityLiveRegion="polite" style={styles.helper}>Loading saved settings…</Text>}
+        <View pointerEvents={isProcessing || !settingsReady ? "none" : "auto"}
+          importantForAccessibility={isProcessing || !settingsReady ? "no-hide-descendants" : "auto"}
+          style={isProcessing || !settingsReady ? styles.disabled : undefined}>
           <AdvanceSettings attenLimDb={attenLimDb} onAttenLimDbChange={changeStrength} normalize={normalize}
             onNormalizeChange={setNormalize} silenceTrim={silenceTrim} onSilenceTrimChange={setSilenceTrim} showSilenceTrim={!hasVideo} />
           {hasVideo && items.length > 1 && <Text style={styles.helper}>Silence trim is unavailable for mixed/video batches to keep video in sync.</Text>}
@@ -210,8 +238,9 @@ export default function ProcessScreen() {
           {stopping ? <Host matchContents colorScheme="dark"><LoadingIndicator color={theme.COLORS.text} /></Host> : <Feather name="square" size={17} color={theme.COLORS.text} />}
           <Text style={styles.stopText}>{stopping ? "Stopping…" : "Stop processing"}</Text></TouchableOpacity>
           : <View style={styles.footerRow}>
-            {doneCount > 0 && <TouchableOpacity onPress={() => router.replace("/")} style={styles.newButton}><Feather name="plus" size={19} color={theme.COLORS.primary} /></TouchableOpacity>}
-            <TouchableOpacity style={[theme.Styles.button, { flex: 1 }]} onPress={() => void run()}><Feather name="zap" size={18} color={theme.COLORS.background} style={{ marginRight: 8 }} /><Text style={theme.Styles.buttonText}>{pendingCount === 0 ? "Process again" : items.length === 1 ? "Start denoising" : `Process ${pendingCount} file${pendingCount === 1 ? "" : "s"}`}</Text></TouchableOpacity>
+            {doneCount > 0 && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Choose new media" onPress={() => router.replace("/")} style={styles.newButton}><Feather name="plus" size={19} color={theme.COLORS.primary} /></TouchableOpacity>}
+            <TouchableOpacity accessibilityRole="button" accessibilityState={{ disabled: !settingsReady }} disabled={!settingsReady}
+              style={[theme.Styles.button, { flex: 1 }, !settingsReady && styles.disabled]} onPress={() => void run()}><Feather name="zap" size={18} color={theme.COLORS.background} style={{ marginRight: 8 }} /><Text style={theme.Styles.buttonText}>{!settingsReady ? "Loading settings…" : pendingCount === 0 ? "Process again" : items.length === 1 ? "Start denoising" : `Process ${pendingCount} file${pendingCount === 1 ? "" : "s"}`}</Text></TouchableOpacity>
           </View>}
       </View>
       <ErrorModal visible={showError} error={error} onClose={() => setShowError(false)} />

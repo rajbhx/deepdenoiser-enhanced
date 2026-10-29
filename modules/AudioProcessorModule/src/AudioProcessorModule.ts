@@ -37,8 +37,10 @@ declare class AudioProcessorModule extends NativeModule<AudioProcessorModuleEven
   ): Promise<string>;
   copyFile(sourceUri: string, destUri: string): Promise<string>;
   copyFileWithSha256(sourceUri: string, destUri: string): Promise<string>;
+  fingerprintFile(sourceUri: string): Promise<{ sha256: string; bytes: number }>;
   getFileSize(path: string): Promise<number>;
   atomicReplaceFile(sourceUri: string, targetUri: string): Promise<string>;
+  getContentDisplayName(sourceUri: string): Promise<string>;
   exportMediaFile(sourceUri: string, filename: string, album: string, video: boolean): Promise<string>;
 }
 

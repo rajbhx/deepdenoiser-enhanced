@@ -14,6 +14,7 @@ on:
         type: choice
         options:
           - debug
+          - test-apk
           - release-apk
           - release-aab
 
@@ -83,11 +84,26 @@ jobs:
       - name: Regression tests (picker, audio, queue, storage and model)
         run: bun run test
 
+      - name: Check generated npm notices
+        run: node scripts/generate-notices.cjs --check
+
       - name: Atomic replacement regression (actual Java implementation)
         run: |
           mkdir -p "$RUNNER_TEMP/dd-atomic"
           javac -d "$RUNNER_TEMP/dd-atomic" modules/AudioProcessorModule/android/src/main/java/expo/modules/audioprocessormodule/AtomicFileWriter.java tests/AtomicFileWriterTest.java
           java -cp "$RUNNER_TEMP/dd-atomic" AtomicFileWriterTest
+
+      - name: Exact native PCM I/O regression (actual JVM implementation)
+        run: |
+          mkdir -p "$RUNNER_TEMP/dd-pcm"
+          javac -d "$RUNNER_TEMP/dd-pcm" modules/AudioProcessorModule/android/src/main/java/expo/modules/audioprocessormodule/PcmIntegrity.java tests/PcmIntegrityTest.java
+          java -cp "$RUNNER_TEMP/dd-pcm" PcmIntegrityTest
+
+      - name: Native incoming-share FIFO regression (actual JVM implementation)
+        run: |
+          mkdir -p "$RUNNER_TEMP/dd-share"
+          javac -d "$RUNNER_TEMP/dd-share" node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/ShareIntentQueue.java tests/ShareIntentQueueTest.java
+          java -cp "$RUNNER_TEMP/dd-share" ShareIntentQueueTest
 
       - name: Real bundled model regression (CPU)
         run: |
@@ -144,13 +160,15 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           EXPECTED_CERT: ${{ secrets.ANDROID_CERT_SHA256 }}
+          RELEASE_REVIEWED: ${{ vars.ANDROID_RELEASE_REVIEWED }}
         run: |
           set -euo pipefail
           BUILD_TYPE="${{ steps.build.outputs.build_type }}"
-          if [ "$BUILD_TYPE" = "debug" ]; then
+          if [ "$BUILD_TYPE" = "debug" ] || [ "$BUILD_TYPE" = "test-apk" ]; then
             echo "mode=testing-debug-signed" >> "$GITHUB_OUTPUT"
             echo "DD_ALLOW_DEBUG_SIGNING=true" >> "$GITHUB_ENV"
           elif [ -n "$KEYSTORE_BASE64$STORE_PASSWORD$KEY_ALIAS$KEY_PASSWORD$EXPECTED_CERT" ]; then
+            [ "$RELEASE_REVIEWED" = "true" ] || { echo "::error::Production signing is blocked until the owner completes docs/THIRD_PARTY_REVIEW.md and sets ANDROID_RELEASE_REVIEWED=true"; exit 1; }
             for VALUE in "$KEYSTORE_BASE64" "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" "$EXPECTED_CERT"; do
               [ -n "$VALUE" ] || { echo "::error::Release signing secrets are incomplete; see docs/RELEASE_SIGNING.md"; exit 1; }
             done
@@ -193,7 +211,7 @@ jobs:
           TMP=$(mktemp -d)
           unzip -q "$BINARY" "$PATTERN" -d "$TMP"
           find "$TMP" -name '*.dex' -print0 | xargs -0 -r strings > "$TMP/dex-strings.txt"
-          for SYMBOL in cancelPendingPick copyFileWithSha256 atomicReplaceFile exportMediaFile STOP_TIMEOUT; do
+          for SYMBOL in cancelPendingPick copyFileWithSha256 atomicReplaceFile exportMediaFile getContentDisplayName fingerprintFile isWriterActive DD_FS_SHORT_READ STOP_TIMEOUT getShareIntentGeneration acknowledgeShareIntent takeShareQueueOverflow ShareIntentQueue; do
             grep -Fq "$SYMBOL" "$TMP/dex-strings.txt" || { echo "::error::$SYMBOL missing from DEX"; exit 1; }
             echo "OK: $SYMBOL present in DEX"
           done

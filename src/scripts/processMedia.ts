@@ -4,7 +4,7 @@ import { beginRun, endRun, getDenoiser } from "./denoiserSingleton";
 import { AlignedDenoiseStream } from "./alignedDenoiseStream";
 import {
   buildCacheKey, buildDecodeKey, buildDenoiseKey, lookupCachedOutput,
-  lookupDecodedPCM, lookupDenoisedPCM, placeOutput, stagePcmPath,
+  lookupDecodedPCM, lookupDenoisedPCM, placeOutput, pruneRebuildableCache, stagePcmPath,
   storeCachedOutput, storeDecodedPCM, storeDenoisedPCM,
 } from "./denoiseCache";
 import { decodeToPCMFile, mergeAudioVideo, PCMtoWav, readPCMChunks, sanitizeFileName, writePCMChunk } from "./formatHandler";
@@ -36,20 +36,13 @@ export async function processMedia(
   onProgress: (value: ProcessingProgress) => void,
 ): Promise<ProcessingResult> {
   const effectiveTrim: SilenceTrimSettings = video ? { ...settings.silenceTrim, enabled: false } : settings.silenceTrim;
-  const cacheKey = buildCacheKey(input, { ...settings, silenceTrim: effectiveTrim });
+  const kind = video ? "video" : "audio";
+  const cacheKey = buildCacheKey(input, { ...settings, silenceTrim: effectiveTrim }, kind);
   const progress = (stage: string, percent = 0, eta: string | null = null) => onProgress({ stage, percent, eta });
   const start = Date.now();
   throwIfCancelled(token);
-  progress("Checking cache...");
-  try {
-    const cached = await lookupCachedOutput(cacheKey);
-    throwIfCancelled(token);
-    if (cached) return { file: cached, seconds: 0, cached: true, trimEnabled: effectiveTrim.enabled };
-  } catch (error) {
-    throwIfCancelled(token);
-    console.warn("Output cache unavailable; processing fresh:", error);
-  }
-
+  // Reserve the run before asynchronous cache verification: it may take a
+  // long time on large outputs, and incoming shares must wait throughout.
   beginRun();
   // Only files created by this run are cleaned up. Previously indexed PCM and
   // completed outputs belong to the cache/user and must never be swept here.
@@ -57,6 +50,15 @@ export async function processMedia(
   const own = (file: fs.File) => { owned.add(file.uri); return file; };
   const retain = (file: fs.File) => owned.delete(file.uri);
   try {
+    progress("Checking cache...");
+    try {
+      const cached = await lookupCachedOutput(cacheKey, kind);
+      throwIfCancelled(token);
+      if (cached) return { file: cached, seconds: 0, cached: true, trimEnabled: effectiveTrim.enabled };
+    } catch (error) {
+      throwIfCancelled(token);
+      console.warn("Output cache unavailable; processing fresh:", error);
+    }
     throwIfCancelled(token);
     const decodeKey = buildDecodeKey(input);
     let pcmFile: fs.File;
@@ -77,10 +79,20 @@ export async function processMedia(
       try { await storeDecodedPCM(decodeKey, pcmFile, sampleRate); retain(staged); }
       catch (error) { console.warn("Could not cache decoded audio:", error); }
     }
-    if (!Number.isFinite(sampleRate) || sampleRate <= 0 || pcmFile.size <= 0) {
-      throw new Error("The file contains no decodable audio samples.");
+    const decodedBytes = pcmFile.size;
+    if (!Number.isSafeInteger(sampleRate) || sampleRate <= 0 || !Number.isSafeInteger(decodedBytes) ||
+        decodedBytes <= 0 || decodedBytes % 2 !== 0) {
+      throw new Error("The file contains invalid or incomplete decoded audio samples.");
     }
-    const totalSamples = pcmFile.size / 2;
+    const totalSamples = decodedBytes / 2;
+    // StreamingResampler.finish uses this same count. Check the RIFF limit
+    // before spending hours processing an output that WAV cannot represent.
+    const expectedSamples = sampleRate === 48000 ? totalSamples : Math.ceil(totalSamples * 48000 / sampleRate - 1e-12);
+    const expectedDenoisedBytes = expectedSamples * 2;
+    if (!Number.isSafeInteger(expectedDenoisedBytes) || expectedDenoisedBytes <= 0 ||
+        expectedDenoisedBytes > 0xffffffff - 36) {
+      throw new Error("This audio is too long for a standard WAV. Split the original into shorter files and try again.");
+    }
     let globalGain = 1;
     if (settings.normalize.toggle) {
       progress("Analyzing loudness...");
@@ -95,6 +107,7 @@ export async function processMedia(
         analyzed += inputSamples;
         progress("Analyzing loudness...", Math.min(100, Math.round(analyzed / totalSamples * 100)));
       });
+      if (analyzed !== totalSamples) throw new Error("Incomplete PCM read during loudness analysis.");
       const currentRms = Math.sqrt(sumSquares / totalSamples);
       const targetRms = Math.pow(10, settings.normalize.targetRMS / 20);
       const targetPeak = Math.pow(10, settings.normalize.maxPeakDb / 20);
@@ -107,7 +120,7 @@ export async function processMedia(
     let denoisedPcmFile: fs.File;
     const cachedDenoise = await lookupDenoisedPCM(denoiseKey);
     throwIfCancelled(token);
-    if (cachedDenoise) {
+    if (cachedDenoise && cachedDenoise.size === expectedDenoisedBytes) {
       denoisedPcmFile = cachedDenoise;
       progress("Reusing denoised audio...");
     } else {
@@ -145,6 +158,9 @@ export async function processMedia(
       throwIfCancelled(token);
       await write(await aligned.finish());
       if (firstWrite) throw new Error("The audio contains no samples after resampling.");
+      if (processedInput !== totalSamples || !staged.exists || staged.size !== expectedDenoisedBytes) {
+        throw new Error("Incomplete denoised audio; the original has been kept. Please retry.");
+      }
       throwIfCancelled(token);
       try { await storeDenoisedPCM(denoiseKey, staged); retain(staged); }
       catch (error) { console.warn("Could not cache denoised audio:", error); }
@@ -182,5 +198,8 @@ export async function processMedia(
       catch (error) { console.warn("Could not remove partial processing file:", error); }
     }
     endRun();
+    // Rebuildable stages are pruned only after all active jobs/recordings stop.
+    try { await pruneRebuildableCache(); }
+    catch (error) { console.warn("Could not prune temporary PCM cache:", error); }
   }
 }

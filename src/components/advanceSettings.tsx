@@ -1,10 +1,10 @@
 import * as theme from "@/src/constants/theme";
 import type { SilenceTrimSettings } from "@/src/scripts/silenceTrim";
 import Feather from "@expo/vector-icons/Feather";
-import { Host, Switch } from "@expo/ui/jetpack-compose";
 import React, { useState } from "react";
 import {
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -85,6 +85,8 @@ export default function AdvanceSettings({
           return (
             <TouchableOpacity
               key={id}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
               style={[styles.presetChip, on && styles.presetChipOn]}
               onPress={() => onAttenLimDbChange(ATTEN_PRESET_DB[id])}
             >
@@ -96,6 +98,8 @@ export default function AdvanceSettings({
 
       <TouchableOpacity
         style={styles.header}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: isOpen }}
         onPress={() => setIsOpen(!isOpen)}
         activeOpacity={0.7}
       >
@@ -121,22 +125,13 @@ export default function AdvanceSettings({
             <View style={styles.settingLabelRow}>
               <View style={theme.Styles.row}>
                 <Text style={styles.settingLabel}>Loudness Normalization</Text>
-                <InfoBubble text={`Boosts quiet audio so the AI can denoise it effectively.\nUse when recordings are too quiet or have inconsistent volume.\nSkip if speech is already at a comfortable listening level.`}>
+                <InfoBubble text={`Applies a capped gain before denoising. The model can change loudness or peaks, so the final output is not guaranteed to meet the targets. Listen to the result.`}>
                   <Feather name="help-circle" size={18} color={theme.COLORS.subtext} />
                 </InfoBubble>
               </View>
-              <Host matchContents style={{ width: 52, height: 32 }} colorScheme="dark">
-                <Switch
-                  value={normalize.toggle}
-                  onCheckedChange={handleToggleNormalize}
-                  colors={{
-                    uncheckedTrackColor: theme.COLORS.border,
-                    checkedTrackColor: theme.COLORS.primary,
-                    checkedThumbColor: theme.COLORS.text,
-                    uncheckedThumbColor: theme.COLORS.text,
-                  }}
-                />
-              </Host>
+              <Switch accessibilityLabel="Loudness normalization" value={normalize.toggle}
+                onValueChange={handleToggleNormalize} trackColor={{ false: theme.COLORS.border, true: theme.COLORS.primary }}
+                thumbColor={normalize.toggle ? theme.COLORS.background : theme.COLORS.text} />
             </View>
           </View>
 
@@ -149,16 +144,16 @@ export default function AdvanceSettings({
                 min={-20}
                 max={-10}
                 decimalPlaces={0}
-                info={`Target loudness of the output.\n-14dB = recommended default.\n-20dB = quieter, more dynamic range.\n-10dB = louder, less headroom.`}
+                info={`Target for gain applied before denoising. Gain is capped to protect peaks and limit amplification. The output loudness can differ after the model.`}
               />
               <CustomSlider
-                label="Peak Limit"
+                label="Input peak target"
                 value={normalize.maxPeakDb}
                 onValueChange={handleMaxPeakChange}
                 min={-10}
                 max={0}
                 decimalPlaces={0}
-                info={`Hard ceiling for the loudest peak.\n-1.0dB = safe default, prevents clipping.\n-10dB = conservative, lots of headroom.\n0dB = maximum loudness, risk of distortion.`}
+                info={`Limits the gain applied to the input before denoising. This is not a hard limiter on model output; listen and check the final result.`}
               />
             </View>
           )}
@@ -166,13 +161,13 @@ export default function AdvanceSettings({
           <View style={{ height: 1, backgroundColor: "rgba(255, 255, 255, 0.05)", marginVertical: 15 }} />
 
           <CustomSlider
-            label="Attenuation Limit"
+            label="Clean/original mix (dB)"
             value={attenLimDb}
             onValueChange={onAttenLimDbChange}
             min={0}
             max={40}
             steps={ALSTEPS}
-            info={`Limits how aggressively the AI removes noise.\n0dB = most aggressive (quietest background).\n40dB = preserves nearly all ambient sound.\nStart at 0dB and increase if audio sounds too processed.`}
+            info={`Blends the cleaned and time-aligned original audio.\n0 dB = 100% cleaned; 20 dB ≈ 10% cleaned; 40 dB ≈ 1% cleaned.\nThis is a mix control, not a measured or guaranteed noise-reduction level.`}
           />
 
           {showSilenceTrim && (
@@ -199,9 +194,13 @@ const styles = StyleSheet.create({
   },
   presetRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     marginBottom: 14,
   },
   presetChip: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginBottom: 8,
     paddingVertical: 6,
     paddingHorizontal: 12,
     marginRight: 8,
@@ -219,7 +218,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   presetChipTextOn: {
-    color: theme.COLORS.white,
+    color: theme.COLORS.background,
   },
 
   container: {

@@ -75,6 +75,11 @@ export async function copyFileWithSha256(sourceUri: string, destUri: string): Pr
   return AudioProcessorModule.copyFileWithSha256(sourceUri, destUri);
 }
 
+/** Stream a file's content hash and length on the native IO dispatcher. */
+export async function fingerprintFile(sourceUri: string): Promise<{ sha256: string; bytes: number }> {
+  return await AudioProcessorModule.fingerprintFile(sourceUri);
+}
+
 export async function getFileSize(path: string): Promise<number> {
   return await AudioProcessorModule.getFileSize(path);
 }
@@ -82,6 +87,11 @@ export async function getFileSize(path: string): Promise<number> {
 /** Atomically replace a local private file, preserving the old file on failure. */
 export async function atomicReplaceFile(sourceUri: string, targetUri: string): Promise<string> {
   return await AudioProcessorModule.atomicReplaceFile(sourceUri, targetUri);
+}
+
+/** Read a provider display name without copying or modifying the source. */
+export async function getContentDisplayName(sourceUri: string): Promise<string> {
+  return AudioProcessorModule.getContentDisplayName(sourceUri);
 }
 
 /** Save app-created media into the appropriate Android shared collection. */

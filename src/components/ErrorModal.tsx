@@ -106,6 +106,7 @@ export default function ErrorModal({ visible, error, onClose }: ErrorModalProps)
     >
       <View style={styles.modalOverlay}>
         <View style={styles.modalContent}>
+          <ScrollView nestedScrollEnabled showsVerticalScrollIndicator>
           <View style={styles.header}>
             <View style={[styles.iconContainer, { backgroundColor: theme.COLORS.error + "20" }]}>
               <Feather name={interpretation.icon} size={28} color={theme.COLORS.error} />
@@ -114,6 +115,7 @@ export default function ErrorModal({ visible, error, onClose }: ErrorModalProps)
           </View>
 
           <Text style={styles.description}>{interpretation.description}</Text>
+          <Text accessibilityRole="alert" style={styles.visibleMessage}>{error.message}</Text>
 
           <TouchableOpacity
             style={styles.detailsToggle}
@@ -170,6 +172,7 @@ export default function ErrorModal({ visible, error, onClose }: ErrorModalProps)
               Close
             </Text>
           </TouchableOpacity>
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -187,6 +190,7 @@ const styles = StyleSheet.create({
   modalContent: {
     width: "100%",
     maxWidth: 400,
+    maxHeight: "90%",
     backgroundColor: theme.COLORS.surface,
     borderRadius: 24,
     padding: 24,
@@ -223,6 +227,7 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     marginBottom: 20,
   },
+  visibleMessage: { color: theme.COLORS.text, fontSize: 13, lineHeight: 19, marginBottom: 16 },
   detailsToggle: {
     flexDirection: "row",
     alignItems: "center",

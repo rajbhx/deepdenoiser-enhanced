@@ -16,6 +16,8 @@ In the repository's **Settings → Secrets and variables → Actions**, add all 
 
 The workflow decodes the keystore only into the runner's temporary directory, signs the release, then checks the artifact's certificate against the expected fingerprint and rejects Android's debug certificate. Missing *some* of the secrets fails the build. When **none** are configured, CI explicitly creates a **testing-debug-signed** artifact; its name and summary say testing only. It is not a production release.
 
+Production signing additionally requires the repository Actions variable `ANDROID_RELEASE_REVIEWED=true`. Set it only after completing [the third-party/model, device, privacy, backup and upgrade review](THIRD_PARTY_REVIEW.md); the gate is a human attestation, not proof of compliance. The bundled model provenance and complete native notices are currently unresolved, so do not set it yet. Local and EAS signing do not enforce this GitHub-only gate: the same review remains mandatory.
+
 You can create a new keystore locally using Android's official `keytool` instructions, or use your existing app-signing/upload key if you already have one. Record the key alias and keep multiple secure, offline backups of the keystore and passwords. Losing the signing key can prevent updates to installed versions. To view the certificate fingerprint locally:
 
 ```sh

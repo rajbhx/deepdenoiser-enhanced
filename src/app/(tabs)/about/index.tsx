@@ -44,11 +44,10 @@ export default function AboutScreen() {
         <View style={[theme.Styles.card, styles.infoCard]}>
           <Text style={styles.cardTitle}>What is DeepDenoiser?</Text>
           <Text style={styles.cardText}>
-            DeepDenoiser is an open-source tool designed to make
-            professional-grade audio noise reduction accessible to everyone. It
-            uses state-of-the-art deep learning to isolate speech and remove
-            background noise in real-time from Video and Audio. Your files never
-            leave your device. Processing happens on your Device.
+            DeepDenoiser uses a speech-focused model to reduce background noise
+            in audio and video. Processing happens on your device; results depend
+            on the recording. Files you share, save elsewhere, or include in an
+            Android backup or device transfer may leave the app.
           </Text>
         </View>
 

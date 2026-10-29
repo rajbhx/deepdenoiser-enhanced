@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit",
     "test:real-model": "node tests/real-model.test.cjs",
     "test:document-picker": "node tests/documentPicker.test.cjs",
-    "test": "node tests/documentPicker.test.cjs && node tests/resampler.test.cjs && node tests/queue-and-compare.test.cjs && node tests/storage-and-processing.test.cjs && node tests/settings-and-model.test.cjs && node tests/pipeline.test.cjs && node tests/recording-safety.test.cjs && node tests/export-and-history.test.cjs && node tests/signing-config.test.cjs && node tests/native-source-contract.test.cjs"
+    "test": "node tests/pcm-integrity.test.cjs && node tests/documentPicker.test.cjs && node tests/resampler.test.cjs && node tests/queue-and-compare.test.cjs && node tests/storage-and-processing.test.cjs && node tests/settings-and-model.test.cjs && node tests/pipeline.test.cjs && node tests/recording-safety.test.cjs && node tests/export-and-history.test.cjs && node tests/signing-config.test.cjs && node tests/native-source-contract.test.cjs && node tests/ux-logic.test.cjs && node tests/ui-regression.test.cjs && node tests/share-lifecycle.test.cjs"
   },
   "dependencies": {
     "@expo/ui": "~57.0.11",
@@ -60,6 +60,7 @@
     "eslint-config-expo": "~57.0.1",
     "expo-dev-client": "~57.0.13",
     "patch-package": "^8.0.1",
+    "react-test-renderer": "19.2.3",
     "typescript": "~6.0.3"
   },
   "private": true,
@@ -70,7 +71,9 @@
     "autolinking": {
       "android": {
         "buildFromSource": [
-          "expo-document-picker"
+          "expo-document-picker",
+          "expo-file-system",
+          "expo-sharing"
         ]
       }
     }

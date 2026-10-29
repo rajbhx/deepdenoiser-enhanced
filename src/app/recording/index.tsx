@@ -87,10 +87,12 @@ export default function RecordingScreen() {
   const [isCatchingUp, setIsCatchingUp] = useState(false);
   // A failed Stop may leave the native writer open even after the hook reports idle.
   const [recorderUncertain, setRecorderUncertain] = useState(false);
+  const [recoveryReady, setRecoveryReady] = useState(false);
   const [finalizingText, setFinalizingText] = useState("Finalizing Audio...");
   const [error, setError] = useState<Error | null>(null);
   const [isErrorModalVisible, setIsErrorModalVisible] = useState(false);
   const [attenLimDb, setAttenLimDb] = useState(0);
+  const [settingsReady, setSettingsReady] = useState(false);
   const [attenPreset, setAttenPreset] = useState<AttenPreset>("max");
   const [silenceTrim, setSilenceTrim] =
     useState<SilenceTrimSettings>(DEFAULT_SILENCE_TRIM);
@@ -99,7 +101,9 @@ export default function RecordingScreen() {
     let active = true;
     void getSettings().then((s) => {
       if (active) { setAttenLimDb(s.attenLimDb); setAttenPreset(s.attenPreset); }
-    }).catch((err) => console.warn("Could not load recording settings:", err));
+    }).catch((err) => {
+      if (active) { setError(new Error(`Could not load saved settings; using the default strength. ${err instanceof Error ? err.message : String(err)}`)); setIsErrorModalVisible(true); }
+    }).finally(() => { if (active) setSettingsReady(true); });
     return () => { active = false; };
   }, []);
 
@@ -113,6 +117,8 @@ export default function RecordingScreen() {
   const isStartingRef = useRef(false);
   const isRecordingRef = useRef(isRecording || isPaused);
   const nativeStartedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const nativeStartPromiseRef = useRef<ReturnType<typeof startAudioRecording> | null>(null);
   const [pausedDuration, setPausedDuration] = useState(0);
   const animRef = useRef<Animated.CompositeAnimation | null>(null);
   const [pulseAnim] = useState(() => new Animated.Value(1));
@@ -129,12 +135,15 @@ export default function RecordingScreen() {
   }, [isPaused, durationMs]);
 
   useEffect(() => {
+    mountedRef.current = true;
     const initDenoiser = async () => {
       try {
         const denoiser = await getDenoiser();
+        if (!mountedRef.current) return;
         denoiserRef.current = denoiser;
         setDenoiserReady(true);
       } catch (err) {
+        if (!mountedRef.current) return;
         console.error("Failed to init denoiser:", err);
         setError(err instanceof Error ? err : new Error(String(err)));
         setIsErrorModalVisible(true);
@@ -146,14 +155,31 @@ export default function RecordingScreen() {
       // Ordinary Back/swipe navigation is prevented while recording. If the
       // screen is nevertheless destroyed, the native file lives in the durable
       // recordings folder and can be recovered from History on next launch.
+      mountedRef.current = false;
       acceptingStreamRef.current = false;
-      const stop = (isRecordingRef.current || nativeStartedRef.current) ? stopAudioRecording() : Promise.resolve();
-      void stop.catch((err) => console.error("Failed to stop recording on unmount:", err))
-        .then(() => queueRef.current?.drain())
-        .catch((err) => console.error("Failed to drain recording queue:", err))
-        .finally(() => {
-          if (runActiveRef.current) { runActiveRef.current = false; endRun(); }
-        });
+      // A Stop/recovery operation already owns the writer and model lifetime.
+      if (isStoppingRef.current) return;
+      // If native Start is still pending, wait for it before asking Stop; a
+      // premature idle check could otherwise miss a writer that starts later.
+      const pendingStart = nativeStartPromiseRef.current;
+      void (async () => {
+        if (pendingStart) { try { await pendingStart; } catch { /* status decides safety */ } }
+        const couldHaveWriter = !!pendingStart || isRecordingRef.current || nativeStartedRef.current;
+        if (couldHaveWriter) {
+          try { await stopAudioRecording(); } catch (err) { console.error("Failed to stop recording on unmount:", err); }
+        }
+        try { await queueRef.current?.drain(); } catch (err) { console.error("Failed to drain recording queue:", err); }
+        if (couldHaveWriter) {
+          try { assertNativeRecorderIdle(); nativeStartedRef.current = false; }
+          catch {
+            // Retain the active-run guard until process restart if native
+            // liveness cannot be proved. Never touch recovery files here.
+            console.warn("Recorder writer is uncertain after unmount; force-stop before recovery.");
+            return;
+          }
+        }
+        if (runActiveRef.current) { runActiveRef.current = false; endRun(); }
+      })();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only: stop on unmount
   }, []);
@@ -196,15 +222,17 @@ export default function RecordingScreen() {
   };
 
   const startRecording = async () => {
-    if (isStartingRef.current || isRecordingRef.current || recorderUncertain) return;
+    if (isStartingRef.current || isRecordingRef.current || recorderUncertain || recoveryReady || !settingsReady) return;
     isStartingRef.current = true;
     setIsStarting(true);
+    let nativeStartAttempted = false;
     try {
       if (!denoiserReady) {
         Alert.alert("Wait", "Denoiser is still initializing...");
         return;
       }
       const permission = await requestRecordingPermissionsAsync();
+      if (!mountedRef.current) return;
       if (!permission.granted) {
         Alert.alert("Microphone permission needed", "Allow microphone access to record your voice. You can still import files without it.");
         return;
@@ -218,6 +246,12 @@ export default function RecordingScreen() {
 
       await origPcm.create();
       await denPcm.create();
+      if (!mountedRef.current) {
+        for (const file of [origPcm, denPcm]) {
+          try { if (file.exists && file.size === 0) file.delete(); } catch { /* best effort */ }
+        }
+        return;
+      }
 
       originalPcmFileRef.current = origPcm;
       denoisedPcmFileRef.current = denPcm;
@@ -232,6 +266,13 @@ export default function RecordingScreen() {
       // Reserve the shared model before creating a per-recording stream.
       if (!runActiveRef.current) { beginRun(); runActiveRef.current = true; }
       const denoiser = await getDenoiser();
+      if (!mountedRef.current) {
+        if (runActiveRef.current) { runActiveRef.current = false; endRun(); }
+        for (const file of [origPcm, denPcm]) {
+          try { if (file.exists && file.size === 0) file.delete(); } catch { /* best effort */ }
+        }
+        return;
+      }
       denoiserRef.current = denoiser;
       const state = denoiser.createStream(attenLimDb);
       const aligned = new AlignedDenoiseStream(HOP_SIZE, metadata.algorithmic_delay_samples,
@@ -262,32 +303,43 @@ export default function RecordingScreen() {
         showNotification: false,
       };
 
-      const started = await startAudioRecording(config);
+      nativeStartAttempted = true;
+      const nativeStart = startAudioRecording(config);
+      nativeStartPromiseRef.current = nativeStart;
+      const started = await nativeStart;
       nativeStartedRef.current = true;
       nativeRecordingRef.current = new fs.File(started.fileUri);
       isRecordingRef.current = true;
     } catch (error) {
       acceptingStreamRef.current = false;
+      if (!mountedRef.current) return; // unmount cleanup owns native liveness
       if (nativeStartedRef.current) {
         try { await stopAudioRecording(); nativeStartedRef.current = false; }
-        catch { setRecorderUncertain(true); }
+        catch { /* Verify writer liveness below rather than trusting the hook. */ }
       }
       await queueRef.current?.drain();
+      let recorderIdle = true;
+      if (nativeStartAttempted) {
+        try { assertNativeRecorderIdle(); nativeStartedRef.current = false; }
+        catch { recorderIdle = false; nativeStartedRef.current = true; setRecorderUncertain(true); }
+      }
       // An empty failed-start scratch file has no recoverable audio.
       for (const file of [originalPcmFileRef.current, denoisedPcmFileRef.current]) {
         try { if (file?.exists && file.size === 0) file.delete(); } catch { /* best effort */ }
       }
-      if (runActiveRef.current) {
+      if (recorderIdle && runActiveRef.current) {
         runActiveRef.current = false;
         endRun();
       }
-      const err = error instanceof Error ? error : new Error(String(error));
+      const cause = error instanceof Error ? error : new Error(String(error));
+      const err = recorderIdle ? cause : new Error(`The recorder may still be active. Check recorder status before recovery; if it cannot be confirmed, force-stop and reopen the app. ${cause.message}`);
       trackAppError(err, { context: "startRecording" });
       setError(err);
       setIsErrorModalVisible(true);
     } finally {
+      nativeStartPromiseRef.current = null;
       isStartingRef.current = false;
-      setIsStarting(false);
+      if (mountedRef.current) setIsStarting(false);
     }
   };
 
@@ -302,6 +354,8 @@ export default function RecordingScreen() {
       // Do not disable callbacks before native Stop: its final event can race
       // this promise. The WAV reconciliation below also covers late callbacks.
       const stopped = await stopAudioRecording();
+      // A resolved JS promise alone does not prove the native writer is closed.
+      assertNativeRecorderIdle();
       nativeStopped = true;
       nativeStartedRef.current = false;
       isRecordingRef.current = false;
@@ -402,7 +456,35 @@ export default function RecordingScreen() {
     }
   };
 
-  usePreventRemove(isRecording || isPaused || isFinalizing || isStarting || recorderUncertain, () => {
+  const checkRecorderStatus = async () => {
+    if (isStoppingRef.current || isStartingRef.current) return;
+    isStoppingRef.current = true;
+    setIsFinalizing(true);
+    setFinalizingText("Checking recorder status...");
+    try {
+      // The hook can report idle after a failed Stop while native still writes.
+      // Verify the native writer, drain accepted callbacks, then verify again.
+      assertNativeRecorderIdle();
+      acceptingStreamRef.current = false;
+      await queueRef.current?.drain();
+      assertNativeRecorderIdle();
+      nativeStartedRef.current = false;
+      isRecordingRef.current = false;
+      if (runActiveRef.current) { runActiveRef.current = false; endRun(); }
+      // Do not inspect, repair or remove any recording here. Both the durable
+      // native WAV and any streamed prefix remain available in Your files.
+      setRecoveryReady(true);
+      setRecorderUncertain(false);
+    } catch (statusError) {
+      const message = statusError instanceof Error ? statusError.message : String(statusError);
+      Alert.alert("Recorder status is still uncertain", `${message} Force-stop the app in Android settings and reopen Your files before attempting recovery.`);
+    } finally {
+      isStoppingRef.current = false;
+      setIsFinalizing(false);
+    }
+  };
+
+  usePreventRemove((!recoveryReady && (isRecording || isPaused)) || isFinalizing || isStarting || recorderUncertain, () => {
     if (recorderUncertain) {
       Alert.alert("Recorder needs recovery", "Force-stop the app in Android settings, then reopen Your files. The original recording was kept.");
       return;
@@ -435,6 +517,8 @@ export default function RecordingScreen() {
     <SafeAreaView style={theme.Styles.container}>
       <View style={styles.header}>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
           onPress={() => router.back()}
           style={({ pressed }) => [
             styles.backButton,
@@ -457,7 +541,7 @@ export default function RecordingScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {!finalOriginalWav && !isFinalizing && (
+        {!finalOriginalWav && !isFinalizing && !recorderUncertain && !recoveryReady && (
           <View style={styles.timerContainer}>
             <Text style={styles.timerText}>
               {formatTime(isPaused ? pausedDuration : (durationMs ?? 0))}
@@ -483,18 +567,38 @@ export default function RecordingScreen() {
             </Host>
             <Text style={styles.statusText}>{finalizingText}</Text>
           </View>
+        ) : recorderUncertain ? (
+          <View style={styles.recoveryContainer}>
+            <Text style={styles.recoveryTitle}>Recorder status needs checking</Text>
+            <Text style={styles.recoveryText}>The recorder may still be writing. Check its status before accessing the original or partial backup. If the status cannot be confirmed, force-stop the app in Android settings and reopen it.</Text>
+            <TouchableOpacity accessibilityRole="button" style={[theme.Styles.button, styles.recoveryButton]} onPress={() => void checkRecorderStatus()}>
+              <Text style={theme.Styles.buttonText}>Check recorder status</Text>
+            </TouchableOpacity>
+          </View>
+        ) : recoveryReady ? (
+          <View style={styles.recoveryContainer}>
+            <Text style={styles.recoveryTitle}>Recorder confirmed stopped</Text>
+            <Text style={styles.recoveryText}>Open Your files to inspect the original recording and any partial backup. Nothing was deleted by the status check.</Text>
+            <TouchableOpacity accessibilityRole="button" style={[theme.Styles.button, styles.recoveryButton]} onPress={() => router.replace("/history")}>
+              <Text style={theme.Styles.buttonText}>Open Your files</Text>
+            </TouchableOpacity>
+          </View>
         ) : !finalOriginalWav ? (
           <View style={styles.controlsContainer}>
-            <Text style={styles.statusText}>
-              {recorderUncertain ? "Force-stop and reopen the app to recover your recording" : !isRecording && !isPaused
+            <Text accessibilityLiveRegion="polite" style={styles.statusText}>
+              {!settingsReady ? "Loading saved settings…" : !denoiserReady ? "Preparing denoiser…" : !isRecording && !isPaused
                 ? "Ready to record"
                 : isPaused
                   ? "Recording paused"
                   : isCatchingUp ? "Recording safely — denoising will finish after stop" : "Denoising in Real-time"}
             </Text>
 
+            {isStarting && <Host matchContents colorScheme="dark"><LoadingIndicator color={theme.COLORS.primary} /></Host>}
+
             {!isRecording && !isPaused ? (
-              <View style={styles.sliderContainer}>
+              <View style={[styles.sliderContainer, (!settingsReady || isStarting) && { opacity: 0.6 }]}
+                pointerEvents={!settingsReady || isStarting ? "none" : "auto"}
+                importantForAccessibility={!settingsReady || isStarting ? "no-hide-descendants" : "auto"}>
                 <Text style={styles.presetLabel}>Strength</Text>
                 <View style={styles.presetRow}>
                   {([
@@ -507,6 +611,8 @@ export default function RecordingScreen() {
                     return (
                       <TouchableOpacity
                         key={id}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: on }}
                         style={[styles.presetChip, on && styles.presetChipOn]}
                         onPress={async () => {
                           setAttenPreset(id);
@@ -523,7 +629,7 @@ export default function RecordingScreen() {
                   })}
                 </View>
                 <CustomSlider
-                  label="Fine tune (dB)"
+                  label="Clean/original mix (dB)"
                   value={attenLimDb}
                   onValueChange={async (v) => {
                     setAttenLimDb(v);
@@ -534,7 +640,7 @@ export default function RecordingScreen() {
                   min={0}
                   max={40}
                   steps={ALSTEPS}
-                  info={`0dB = strongest denoise. Higher keeps more ambient sound.`}
+                  info={`Blends cleaned and time-aligned original audio: 0 dB = 100% cleaned, 20 dB ≈ 10%, 40 dB ≈ 1%. This is not a measured noise-reduction level.`}
                 />
 
                 <View style={styles.settingsDivider} />
@@ -552,8 +658,11 @@ export default function RecordingScreen() {
                   styles.recordButton,
                   { opacity: pressed ? 0.9 : 1 },
                 ]}
+                accessibilityRole="button"
+                accessibilityLabel="Start recording"
+                accessibilityState={{ disabled: !settingsReady || !denoiserReady || isStarting }}
                 onPress={startRecording}
-                disabled={recorderUncertain}
+                disabled={!settingsReady || !denoiserReady || isStarting}
                 android_ripple={{
                   color: "rgba(255, 255, 255, 0.2)",
                   borderless: true,
@@ -563,7 +672,7 @@ export default function RecordingScreen() {
                 <View style={styles.recordButtonInner}>
                   <Feather name="mic" size={40} color={theme.COLORS.white} />
                 </View>
-                <Text style={styles.buttonLabel}>{recorderUncertain ? "Restart required" : "Tap to Start"}</Text>
+                <Text style={styles.buttonLabel}>{!settingsReady || !denoiserReady ? "Preparing…" : isStarting ? "Starting…" : "Tap to Start"}</Text>
               </Pressable>
             ) : (
               <View style={styles.activeControls}>
@@ -575,6 +684,8 @@ export default function RecordingScreen() {
                       opacity: pressed ? 0.7 : 1,
                     },
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={isPaused ? "Resume recording" : "Pause recording"}
                   onPress={isPaused ? resumeRecording : pauseRecording}
                   android_ripple={{
                     color: "rgba(255, 255, 255, 0.2)",
@@ -594,6 +705,8 @@ export default function RecordingScreen() {
                     styles.stopButton,
                     { opacity: pressed ? 0.8 : 1 },
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Stop and save recording"
                   onPress={stopRecording}
                   android_ripple={{
                     color: "rgba(255, 255, 255, 0.2)",
@@ -742,9 +855,13 @@ const styles = StyleSheet.create({
   },
   presetRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     marginBottom: 16,
   },
   presetChip: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginBottom: 8,
     paddingVertical: 6,
     paddingHorizontal: 12,
     marginRight: 8,
@@ -762,7 +879,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   presetChipTextOn: {
-    color: theme.COLORS.white,
+    color: theme.COLORS.background,
   },
 
   header: {
@@ -839,6 +956,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     width: "100%",
   },
+  recoveryContainer: { width: "100%", gap: 16, padding: 20, backgroundColor: theme.COLORS.surface, borderRadius: 18, marginTop: 30 },
+  recoveryTitle: { color: theme.COLORS.text, fontSize: 19, fontWeight: "800" },
+  recoveryText: { color: theme.COLORS.subtext, fontSize: 14, lineHeight: 22 },
+  recoveryButton: { minHeight: 48, paddingHorizontal: 16 },
   finalizingContainer: {
     alignItems: "center",
     justifyContent: "center",

@@ -7,6 +7,18 @@ let loadedKey: string | null = null;
 let activeRuns = 0;
 let pendingReset = false;
 let operations: Promise<void> = Promise.resolve();
+const runListeners = new Set<() => void>();
+
+/** Observe the shared recording/processing guard without polling. */
+export function subscribeProcessingActivity(listener: () => void): () => void {
+  runListeners.add(listener);
+  return () => { runListeners.delete(listener); };
+}
+function notifyRunListeners(): void {
+  for (const listener of runListeners) {
+    try { listener(); } catch (error) { console.warn("Could not notify processing observer:", error); }
+  }
+}
 
 /** Serialize loading/releasing; a failed load must not poison the queue. */
 function exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -15,9 +27,10 @@ function exclusive<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
-export function beginRun(): void { activeRuns++; }
+export function beginRun(): void { activeRuns++; notifyRunListeners(); }
 export function endRun(): void {
   activeRuns = Math.max(0, activeRuns - 1);
+  notifyRunListeners();
   if (activeRuns === 0 && pendingReset) void resetDenoiser();
 }
 export function getEngineLabel(): string { return instance?.lastEngine ?? "not-loaded"; }

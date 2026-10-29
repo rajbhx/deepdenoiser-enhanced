@@ -25,6 +25,7 @@ class File {
   get modificationTime() { return this.exists ? fs.statSync(filePath(this)).mtimeMs : null; }
   get type() { return ''; }
   async text() { return fs.promises.readFile(filePath(this), 'utf8'); }
+  textSync() { return fs.readFileSync(filePath(this), 'utf8'); }
   async write(data) { await fs.promises.writeFile(filePath(this), data); }
   delete() { fs.unlinkSync(filePath(this)); }
   async move(dest, options) { if (dest.exists && !options?.overwrite) throw new Error('exists'); await fs.promises.rename(filePath(this),filePath(dest)); this.uri=dest.uri; }
@@ -40,7 +41,7 @@ function load(file, stubs={}) {
   try { const mod = new Module(filename,module); mod.filename=filename; mod.paths=Module._nodeModulePaths(__dirname); mod._compile(js,filename); return mod.exports; }
   finally { Module._load=old; }
 }
-let copyCount=0;
+let copyCount=0, activeRun=false;
 const cacheApi = load('denoiseCache', {
   '@/assets/model/model_metadata.json':{hop_size:512,fft_size:960},
   '@/modules/AudioProcessorModule':{atomicReplaceFile: async (src,dst)=>{await fs.promises.rename(filePath(src),filePath(dst));return dst}, copyFileWithSha256:async (source,dest) => {
@@ -48,7 +49,8 @@ const cacheApi = load('denoiseCache', {
     const bytes=await fs.promises.readFile(filePath(source));
     await fs.promises.writeFile(filePath(dest),bytes);
     return crypto.createHash('sha256').update(bytes).digest('hex');
-  }},
+  }, fingerprintFile:async source=>{const bytes=await fs.promises.readFile(filePath(source));return {bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')}}},
+  './denoiserSingleton':{isProcessingMedia:()=>activeRun},
   'expo-file-system':stubFs,
   './formatHandler':{sanitizeFileName:s=>s.replace(/[^a-zA-Z0-9._-]/g,'_') || 'denoised'},
 });
@@ -66,6 +68,17 @@ const cacheApi = load('denoiseCache', {
   assert.notEqual(cacheApi.buildInputIdentity(first),cacheApi.buildInputIdentity(second));
   console.log('PASS full-content import identity prevents same-name/same-size collision');
 
+  assert.equal(cacheApi.readImportedMediaKind(first), null, 'legacy imports are explicitly unknown');
+  await cacheApi.setImportedMediaKind(first, 'video');
+  assert.equal(cacheApi.readImportedMediaKind(first), 'video');
+  await cacheApi.importToDocuments(a.uri, 'same.wav', undefined, 'audio');
+  assert.equal(cacheApi.readImportedMediaKind(first), 'video', 'duplicate re-import must preserve the user-selected kind');
+  await cacheApi.setImportedMediaKind(first, 'audio');
+  assert.equal(cacheApi.readImportedMediaKind(first), 'audio', 'the user can correct a classification');
+  await assert.rejects(()=>cacheApi.setImportedMediaKind(a, 'video'), /Invalid imported media type/);
+  assert.ok(!fs.readdirSync(filePath(importDir)).some(n=>n.endsWith('.kind.json')), 'metadata is never listed as media');
+  console.log('PASS atomic media-kind metadata persists, preserves duplicate imports and supports correction');
+
   const fallback = await cacheApi.importToDocuments(new File(root,'missing').uri,'fallback.wav',a.uri);
   assert.equal(await fallback.text(),'aaaa');
   await assert.rejects(()=>cacheApi.importToDocuments(new File(root,'missing').uri,'bad.wav'));
@@ -79,10 +92,69 @@ const cacheApi = load('denoiseCache', {
   console.log('PASS output files with duplicate names never overwrite each other');
 
   await Promise.all(Array.from({length:40},(_,i)=>cacheApi.storeCachedOutput('key-'+i, i%2?out1:out2)));
-  for(let i=0;i<40;i++) assert.ok(await cacheApi.lookupCachedOutput('key-'+i),'lost concurrent cache index update '+i);
+  for(let i=0;i<40;i++) assert.ok(await cacheApi.lookupCachedOutput('key-'+i,'audio'),'lost concurrent cache index update '+i);
   for(let i=40;i<110;i++) await cacheApi.storeCachedOutput('key-'+i,out1);
   assert.ok(out1.exists && out2.exists,'pruning indexes must never delete finished media');
   console.log('PASS concurrent cache index updates are serialized and pruning preserves outputs');
+
+  const keySettings={attenLimDb:0,normalize:{toggle:false,targetRMS:-14,maxPeakDb:-1},silenceTrim:{enabled:false,mode:'auto',thresholdDb:-40,minSilenceMs:500}};
+  const audioKey=cacheApi.buildCacheKey(first,keySettings,'audio'), videoKey=cacheApi.buildCacheKey(first,keySettings,'video');
+  assert.notEqual(audioKey,videoKey,'audio and video results cannot share an output key');
+  await cacheApi.storeCachedOutput(videoKey,out1);
+  assert.equal(await cacheApi.lookupCachedOutput(videoKey,'video'),null,'a WAV cannot be returned as a video result');
+  assert.ok(out1.exists,'invalid cache references must not delete user output');
+  const outputIndex=new File(doc,'denoiser_cache.json');const broken=JSON.parse(await outputIndex.text());broken.malformed={path:42,createdAt:0};broken.outside={path:a.uri,createdAt:0};await outputIndex.write(JSON.stringify(broken));
+  assert.equal(await cacheApi.lookupCachedOutput('malformed','audio'),null);assert.equal(await cacheApi.lookupCachedOutput('outside','audio'),null);assert.ok(a.exists&&out1.exists);
+  console.log('PASS output cache is kind-aware and safely rejects mismatched or corrupt references');
+
+  const decoded=new File(cache,'stage_dec_123_a1.pcm'), cleaned=new File(cache,'stage_dn_456_b2.pcm');
+  const emergency=new File(cache,'orig_123.pcm'), impostor=new File(doc,'stage_dec_789_c3.pcm');
+  await decoded.write('decode');await cleaned.write('clean!');await emergency.write('original');await impostor.write('not-cache');
+  await cacheApi.storeDecodedPCM('decode',decoded,48000);await cacheApi.storeDenoisedPCM('denoise',cleaned);
+  await assert.rejects(()=>cacheApi.storeDecodedPCM('unsafe-original',emergency,48000),/Invalid decoded/);
+  await assert.rejects(()=>cacheApi.storeDecodedPCM('unsafe-location',impostor,48000),/Invalid decoded/);
+  const decodeIndex=new File(doc,'decode_cache.json');const unsafeIndex=JSON.parse(await decodeIndex.text());
+  unsafeIndex['unsafe-original']={path:emergency.uri,createdAt:0};unsafeIndex['unsafe-location']={path:impostor.uri,createdAt:0};
+  await decodeIndex.write(JSON.stringify(unsafeIndex));
+  assert.equal(await cacheApi.getRebuildableCacheBytes(),12,'only indexed, verified stage bytes count as reclaimable');
+  await assert.rejects(()=>cacheApi.clearRebuildableCache(()=>{throw new Error('busy')}),/busy/);
+  assert.ok(decoded.exists && cleaned.exists && emergency.exists && impostor.exists);
+  let releaseRead, markRead; const gate=new Promise(resolve=>{releaseRead=resolve}), started=new Promise(resolve=>{markRead=resolve});
+  const oldText=File.prototype.text; let block=true;
+  File.prototype.text=async function(){if(block&&this.name==='decode_cache.json'){markRead();await gate;}return oldText.call(this)};
+  let busy=false; const clearing=cacheApi.clearRebuildableCache(()=>{if(busy)throw new Error('new run started')});
+  await started;busy=true;block=false;releaseRead();await assert.rejects(()=>clearing,/new run started/);File.prototype.text=oldText;
+  assert.ok(decoded.exists && cleaned.exists,'safety is rechecked inside the lock after asynchronous reads');
+  await cacheApi.clearRebuildableCache(()=>{});
+  assert.ok(!decoded.exists && !cleaned.exists);assert.ok(emergency.exists && impostor.exists && out1.exists && first.exists);
+  assert.equal(await cacheApi.getRebuildableCacheBytes(),0);
+  console.log('PASS cache clearing preserves recordings, backups, imports and outputs and guards processing races');
+
+  const verified=new File(cache,'stage_dec_789_d4.pcm');await verified.write('abcdefgh');
+  await cacheApi.storeDecodedPCM('verified',verified,48000);
+  assert.ok(await cacheApi.lookupDecodedPCM('verified'),'complete stage is reusable');
+  await verified.write('ABCDEFGH');
+  assert.equal(await cacheApi.lookupDecodedPCM('verified'),null,'same-size corrupted stage must not be reused');
+  assert.ok(verified.exists,'unverified media is not blindly deleted');
+  await cacheApi.storeDecodedPCM('verified',verified,48000);
+  await verified.write('ABCD');
+  assert.equal(await cacheApi.lookupDecodedPCM('verified'),null,'truncated stage must not be reused');
+  const denVerified=new File(cache,'stage_dn_790_d5.pcm');await denVerified.write('12345678');
+  await cacheApi.storeDenoisedPCM('den-verified',denVerified);await denVerified.write('87654321');
+  assert.equal(await cacheApi.lookupDenoisedPCM('den-verified'),null,'same-size denoise corruption is rejected');
+  const userTemp=new File(cache,'user-output');await userTemp.write('wav-data');
+  const userOut=await cacheApi.placeOutput(userTemp,'verify.wav');
+  await cacheApi.storeCachedOutput('user-output',userOut);await userOut.write('tampered');
+  assert.equal(await cacheApi.lookupCachedOutput('user-output','audio'),null);
+  assert.ok(userOut.exists,'invalid output index must never delete user media');
+  console.log('PASS SHA-256 and byte-length checks reject truncated and same-size changed cache/output files');
+
+  const giant=new File(cache,'stage_dec_999_e5.pcm');await giant.write('');fs.truncateSync(filePath(giant),512*1024*1024+2);
+  const oversizedIndex=JSON.parse(await decodeIndex.text());oversizedIndex.giant={path:giant.uri,createdAt:1};await decodeIndex.write(JSON.stringify(oversizedIndex));
+  activeRun=true;await cacheApi.pruneRebuildableCache();assert.ok(giant.exists,'never prune a stage while processing or recording');
+  activeRun=false;await cacheApi.pruneRebuildableCache();assert.ok(!giant.exists,'idle PCM cache is byte-bounded');
+  assert.ok(emergency.exists&&first.exists&&userOut.exists,'byte pruning preserves recoverable/user files');
+  console.log('PASS idle stage cache is byte-bounded without deleting recordings or active data');
 
   const { runSequentialQueue, ProcessingCancelled, throwIfCancelled }=load('batchQueue');
   let began=0, ended=0, token={cancelled:false}, staged;
@@ -93,7 +165,7 @@ const cacheApi = load('denoiseCache', {
     './alignedDenoiseStream':load('alignedDenoiseStream'),
     './denoiserSingleton':{beginRun(){began++},endRun(){ended++},getDenoiser:async()=>assert.fail('no inference after cancellation')},
     './denoiseCache':{buildCacheKey:()=>'',buildDecodeKey:()=>'',buildDenoiseKey:()=>'',lookupCachedOutput:async()=>null,
-      lookupDecodedPCM:async()=>null,stagePcmPath:()=> 'stage_dec_test.pcm', lookupDenoisedPCM:async()=>null},
+      lookupDecodedPCM:async()=>null,stagePcmPath:()=> 'stage_dec_test.pcm', lookupDenoisedPCM:async()=>null, pruneRebuildableCache:async()=>{}},
     './formatHandler':{decodeToPCMFile:async(_input,uri)=>{staged=new File(uri); await staged.write('partial'); token.cancelled=true; return {file:staged,sampleRate:48000};}},
   });
   const settings={attenLimDb:0,normalize:{toggle:false,targetRMS:-14,maxPeakDb:-1},silenceTrim:{enabled:false,mode:'auto',thresholdDb:-40,minSilenceMs:500}};

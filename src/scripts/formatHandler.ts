@@ -95,8 +95,37 @@ export async function PCMtoWav(
 ): Promise<WavResult> {
   const outputFile = new fs.File(fs.Paths.cache, `denoised_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.wav`);
   try {
+    const pcmBytes = file.size;
+    if (!file.exists || !Number.isSafeInteger(pcmBytes) || pcmBytes <= 0 || pcmBytes % 2 !== 0 || pcmBytes > 0xffffffff - 36) {
+      throw new Error("Invalid, incomplete or oversized 16-bit PCM; the original was kept.");
+    }
+    if (!Number.isSafeInteger(sampleRate) || sampleRate <= 0 || sampleRate > 0x3fffffff) {
+      throw new Error("Invalid WAV sample rate.");
+    }
     const result = await nativePcmToWav(file.uri, outputFile.uri, sampleRate, 1, 16,
       silenceTrim && silenceTrim.enabled ? trimToNativeConfig(silenceTrim) : null);
+    if (!outputFile.exists || !Number.isSafeInteger(outputFile.size) || outputFile.size < 46) {
+      throw new Error("WAV output is missing or incomplete.");
+    }
+    const size = outputFile.size;
+    const handle = outputFile.open();
+    try {
+      const header = readExactPcmBytes(handle, 0, 44, size);
+      const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+      const tag = (offset: number) => String.fromCharCode(...header.subarray(offset, offset + 4));
+      if (tag(0) !== "RIFF" || tag(8) !== "WAVE" || tag(12) !== "fmt " || tag(36) !== "data" ||
+          view.getUint32(4, true) + 8 !== size || view.getUint32(40, true) + 44 !== size ||
+          view.getUint32(40, true) % 2 !== 0 || view.getUint32(40, true) > pcmBytes ||
+          (!result.trimmed && view.getUint32(40, true) !== pcmBytes) ||
+          view.getUint16(20, true) !== 1 || view.getUint16(22, true) !== 1 ||
+          view.getUint32(24, true) !== sampleRate || view.getUint16(34, true) !== 16) {
+        throw new Error("WAV output failed its length or format verification.");
+      }
+    } finally { handle.close(); }
+    if (!Number.isFinite(result.trimStartUs) || !Number.isFinite(result.trimEndUs) ||
+        result.trimStartUs < 0 || result.trimEndUs < result.trimStartUs || typeof result.trimmed !== "boolean") {
+      throw new Error("WAV output has invalid timing information.");
+    }
     return { file: outputFile, trimStartUs: result.trimStartUs, trimEndUs: result.trimEndUs, trimmed: result.trimmed };
   } catch (error) {
     try { if (outputFile.exists) outputFile.delete(); } catch { /* best effort */ }
@@ -119,6 +148,40 @@ export function resample(
   return result;
 }
 
+/** Read a stable PCM range completely or fail; partial reads are not silence. */
+function readExactPcmBytes(handle: fs.FileHandle, offset: number, length: number, expectedSize: number): Uint8Array {
+  const assertSize = () => {
+    // Older/mock handles may not expose size, but Android's native handle does.
+    const currentSize = handle.size;
+    if (typeof currentSize === "number" && currentSize !== expectedSize) {
+      throw new Error("PCM file size changed during processing; please retry from the original.");
+    }
+  };
+  assertSize();
+  handle.offset = offset;
+  const first = handle.readBytes(length);
+  if (first.byteLength > length) throw new Error("Invalid PCM read length.");
+  let bytes: Uint8Array;
+  if (first.byteLength === length) {
+    // Int16Array requires an even underlying byte offset.
+    bytes = first.byteOffset % 2 === 0 ? first : new Uint8Array(first);
+  } else {
+    bytes = new Uint8Array(length);
+    bytes.set(first);
+    let received = first.byteLength;
+    while (received < length) {
+      const next = handle.readBytes(length - received);
+      if (!next.byteLength || next.byteLength > length - received) {
+        throw new Error(`Incomplete PCM read: expected ${length} bytes, received ${received}.`);
+      }
+      bytes.set(next, received);
+      received += next.byteLength;
+    }
+  }
+  assertSize();
+  return bytes;
+}
+
 export async function PCMtoArray(
   file: fs.File,
   inputRate?: number,
@@ -127,8 +190,8 @@ export async function PCMtoArray(
   if (!file.exists) throw new Error("File does not exist");
 
   const fileSize = file.size;
-  if (fileSize % 2 !== 0) {
-    throw new Error(`Invalid PCM data: Byte length (${fileSize}) is not divisible by 2.`);
+  if (!Number.isSafeInteger(fileSize) || fileSize < 0 || fileSize % 2 !== 0) {
+    throw new Error(`Invalid PCM data: byte length (${fileSize}) must be a non-negative even integer.`);
   }
 
   const numSamples = fileSize / 2;
@@ -139,8 +202,7 @@ export async function PCMtoArray(
     const chunkSize = 256 * 1024; // 256KB chunks
     for (let offset = 0; offset < fileSize; offset += chunkSize) {
       const length = Math.min(chunkSize, fileSize - offset);
-      handle.offset = offset;
-      const bytes = handle.readBytes(length);
+      const bytes = readExactPcmBytes(handle, offset, length, fileSize);
       const chunk = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
       pcmArray.set(chunk, offset / 2);
     }
@@ -169,7 +231,12 @@ export async function readPCMChunks(
 ): Promise<void> {
   if (!file.exists) throw new Error("File does not exist");
   const fileSize = file.size;
-  if (fileSize % 2 !== 0) throw new Error("Invalid 16-bit PCM byte length.");
+  if (!Number.isSafeInteger(fileSize) || fileSize < 0 || fileSize % 2 !== 0) {
+    throw new Error("Invalid 16-bit PCM byte length.");
+  }
+  if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0 || chunkSize > 0x3fffffff) {
+    throw new Error("Invalid PCM chunk size.");
+  }
   const resampler = inputRate && targetRate && inputRate !== targetRate
     ? new StreamingResampler(inputRate, targetRate) : null;
   const handle = file.open();
@@ -177,8 +244,7 @@ export async function readPCMChunks(
     const bytesPerChunk = chunkSize * 2;
     for (let offset = 0; offset < fileSize; offset += bytesPerChunk) {
       const length = Math.min(bytesPerChunk, fileSize - offset);
-      handle.offset = offset;
-      const bytes = handle.readBytes(length);
+      const bytes = readExactPcmBytes(handle, offset, length, fileSize);
       const pcmChunk = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
       let floatChunk: Float32Array;
       if (resampler) {
@@ -250,24 +316,29 @@ export async function ArraytoPCM(f32array: Float32Array): Promise<fs.File> {
 
   return outputFile;
 }
-export async function saveToDevice(file: fs.File, albumName = "DeepDenoiser"): Promise<boolean> {
-  try {
-    if (Platform.OS !== "android") throw new Error("Shared-media saving is supported on Android");
-    const video = /\.mp4$/i.test(file.name);
-    if (!video && !/\.wav$/i.test(file.name)) throw new Error("Unsupported output format");
-    // Android 10+ can add our own files without broad media-read permission.
-    // Android 8/9 still requires legacy write access.
-    if (Number(Platform.Version) < 29) {
-      const { status } = await requestPermissionsAsync(true, [video ? "video" : "audio"]);
-      if (status !== "granted") return false;
-    }
-    await exportMediaFile(file.uri, file.name, albumName, video);
-    trackAppEvent("save_file");
-    return true;
-  } catch (e) {
-    console.error("Failed to save file to device:", e);
-    return false;
+/** Match the public folder naming used by the Android MediaStore exporter. */
+export function savedMediaLocation(file: fs.File, albumName = "DeepDenoiser"): string {
+  const video = /\.mp4$/i.test(file.name);
+  const cleanAlbum = albumName.replace(/[^A-Za-z0-9 _-]/g, " ").trim().slice(0, 80) || "DeepDenoiser";
+  return `${video ? "Movies" : "Music"}/${cleanAlbum} ${video ? "Video" : "Audio"}`;
+}
+
+/** Return the published URI and preserve specific permission/export errors. */
+export async function saveToDevice(file: fs.File, albumName = "DeepDenoiser"): Promise<string> {
+  if (Platform.OS !== "android") throw new Error("Shared-media saving is supported on Android.");
+  const video = /\.mp4$/i.test(file.name);
+  if (!video && !/\.wav$/i.test(file.name)) throw new Error("Only WAV audio and MP4 video can be saved to the device.");
+  if (!file.exists || file.size <= 0) throw new Error("The file is missing or empty; nothing was saved.");
+  // Android 10+ can add our own files without broad media-read permission.
+  // Android 8/9 still requires legacy write access.
+  if (Number(Platform.Version) < 29) {
+    const { status } = await requestPermissionsAsync(true, [video ? "video" : "audio"]);
+    if (status !== "granted") throw new Error("Storage permission denied. Allow storage access in Android settings and try again.");
   }
+  const uri = await exportMediaFile(file.uri, file.name, albumName, video);
+  if (!uri) throw new Error("The device did not confirm that the file was saved.");
+  trackAppEvent("save_file");
+  return uri;
 }
 export async function mergeAudioVideo(
   video: fs.File,

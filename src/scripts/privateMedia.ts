@@ -1,5 +1,5 @@
 import * as fs from "expo-file-system";
-import { importsDir, outputDir } from "./denoiseCache";
+import { importsDir, outputDir, readImportedMediaKind } from "./denoiseCache";
 import { recordingsDir } from "./recordingSafety";
 
 export type PrivateMediaGroup = "results" | "recordings" | "imports";
@@ -10,6 +10,7 @@ export type PrivateMedia = {
   size: number;
   modified: number;
   video: boolean;
+  kindKnown: boolean;
   partial: boolean;
 };
 
@@ -36,8 +37,10 @@ export function listPrivateMedia(): PrivateMedia[] {
       if (group === "results" && !/\.(wav|mp4)$/i.test(raw)) continue;
       if (group === "imports" && (raw.startsWith("_pending_") || raw.endsWith(".tmp"))) continue;
       const name = partial ? `Partial backup · ${raw}` : group === "imports" ? raw.replace(/^[0-9a-f]{64}_/i, "") : raw;
-      items.push({ file: item, group, name, size: item.size,
-        modified: item.modificationTime ?? 0, partial: !!partial, video: /\.(mp4|mov|m4v|webm|mkv)$/i.test(name) });
+      const storedKind = group === "imports" ? readImportedMediaKind(item) : null;
+      items.push({ file: item, group, name, size: item.size, modified: item.modificationTime ?? 0,
+        partial: !!partial, kindKnown: group !== "imports" || storedKind !== null,
+        video: storedKind ? storedKind === "video" : /\.(mp4|mov|m4v|webm|mkv)$/i.test(name) });
     }
   }
   return items.sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name));

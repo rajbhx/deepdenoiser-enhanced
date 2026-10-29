@@ -1,5 +1,7 @@
 package expo.modules.audioprocessormodule
 
+import android.net.Uri
+import android.provider.OpenableColumns
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -124,6 +126,37 @@ class AudioProcessorModule : Module() {
                     promise.resolve(digest)
                 } catch (e: Exception) {
                     promise.reject("ERR_COPY_HASH", e.message ?: e.toString(), e)
+                }
+            }
+        }
+
+        AsyncFunction("fingerprintFile") { sourceUri: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val result = newProcessor().use { it.fingerprintFile(sourceUri) }
+                    promise.resolve(result)
+                } catch (e: Exception) {
+                    promise.reject("ERR_FILE_INTEGRITY", e.message ?: e.toString(), e)
+                }
+            }
+        }
+
+        // Query a provider's display name without copying into a shared cache path.
+        // The caller treats a missing or inaccessible name as optional metadata.
+        AsyncFunction("getContentDisplayName") { sourceUri: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = appContext.reactContext ?: throw Exception("React Context is null")
+                    val uri = Uri.parse(sourceUri)
+                    val name = if (uri.scheme == "content") {
+                        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+                        }
+                    } else if (uri.scheme == "file") uri.lastPathSegment else null
+                    promise.resolve(name ?: "")
+                } catch (e: Exception) {
+                    promise.resolve("")
                 }
             }
         }

@@ -3,22 +3,29 @@ import ErrorModal from "@/src/components/ErrorModal";
 import SettingsSidebar from "@/src/components/SettingsSidebar";
 import VideoPlayer from "@/src/components/videoPlayer";
 import * as theme from "@/src/constants/theme";
-import { cleanupTempCache, importToDocuments } from "@/src/scripts/denoiseCache";
+import { cleanupTempCache, importToDocuments, readImportedMediaKind, setImportedMediaKind } from "@/src/scripts/denoiseCache";
 import { pickDocument } from "@/src/scripts/documentPicker";
 import { MAX_BATCH_FILES, mediaKind, type SelectedMedia } from "@/src/scripts/mediaSelection";
-import { claimSharedFile, finishSharedFile } from "@/src/scripts/shareClaim";
+import { claimSharedBatch, finishSharedBatch } from "@/src/scripts/shareClaim";
+import { importSharedMedia } from "@/src/scripts/sharedImport";
+import { isCurrentShare, useRawIncomingShare } from "@/src/scripts/useRawIncomingShare";
+import { useProcessingBusy } from "@/src/scripts/useProcessingBusy";
 import Feather from "@expo/vector-icons/Feather";
 import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
-import * as fs from "expo-file-system";
+import { File } from "expo-file-system";
 import { Image } from "expo-image";
-import { useRouter } from "expo-router";
-import { useIncomingShare } from "expo-sharing";
+import { useIsFocused, useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function HomeScreen() {
   const router = useRouter();
+  const focused = useIsFocused();
+  const processingBusy = useProcessingBusy();
+  // Do not consume the next queued share until this screen has lost and regained focus.
+  const navigatingFromShare = useRef(false);
+  useEffect(() => { if (focused) navigatingFromShare.current = false; }, [focused]);
   const [files, setFiles] = useState<SelectedMedia[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState("Preparing media…");
@@ -26,40 +33,49 @@ export default function HomeScreen() {
   const [isErrorModalVisible, setIsErrorModalVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const importInFlightRef = useRef(false);
-  const { resolvedSharedPayloads, isResolving, clearSharedPayloads, error: shareError } = useIncomingShare();
+  const reportedShareError = useRef<Error | null>(null);
+  const { payloads: sharedPayloads, generation: shareGeneration, consume: consumeShare, discardUnreadable, error: shareError } = useRawIncomingShare();
 
   useEffect(() => {
-    if (isResolving || !resolvedSharedPayloads.length) {
-      if (shareError) console.warn("Shared file could not be resolved:", shareError);
+    if (!focused || processingBusy || navigatingFromShare.current || importInFlightRef.current) return;
+    if (shareError) {
+      if (reportedShareError.current !== shareError) {
+        reportedShareError.current = shareError;
+        Alert.alert("Could not read shared media", `${shareError.message}\nPlease share the files again.`, [
+          { text: "Dismiss", onPress: discardUnreadable },
+        ]);
+      }
       return;
     }
-    const payload = resolvedSharedPayloads[0];
-    const uri = payload?.contentUri;
-    if (!uri || !claimSharedFile(uri)) return;
-    (async () => {
-      let success = false;
+    reportedShareError.current = null;
+    if (!sharedPayloads.length || !isCurrentShare(sharedPayloads, shareGeneration)) return;
+    const claim = claimSharedBatch([shareGeneration]);
+    if (!claim) return;
+    importInFlightRef.current = true;
+    void (async () => {
       try {
-        setLoadingLabel("Preparing shared file…"); setIsLoading(true);
-        const name = payload.originalName ?? "shared_file";
-        const imported = await importToDocuments(uri, name, payload.value);
-        const selection: SelectedMedia[] = [{ uri: imported.uri, name, kind: mediaKind(name, payload.contentMimeType ?? payload.mimeType ?? (payload.contentType === "video" ? "video/*" : undefined)) }];
-        clearSharedPayloads();
-        success = true;
+        setLoadingLabel("Preparing shared files…"); setIsLoading(true);
+        const selection = await importSharedMedia(sharedPayloads,
+          (current, total) => setLoadingLabel(`Importing shared file ${current} of ${total}…`));
+        navigatingFromShare.current = true;
+        consumeShare(sharedPayloads, shareGeneration);
         router.push({ pathname: "/processing/process", params: {
-          fileuri: encodeURIComponent(imported.uri),
-          filename: encodeURIComponent(name),
+          fileuri: encodeURIComponent(selection[0].uri),
+          filename: encodeURIComponent(selection[0].name),
           batch: encodeURIComponent(JSON.stringify(selection)),
         } });
       } catch (copyError) {
-        clearSharedPayloads();
-        setError(copyError instanceof Error ? copyError : new Error(String(copyError)));
-        setIsErrorModalVisible(true);
+        navigatingFromShare.current = false;
+        consumeShare(sharedPayloads, shareGeneration);
+        const message = copyError instanceof Error ? copyError.message : String(copyError);
+        Alert.alert("Could not import shared media", message, [{ text: "OK", onPress: () => router.navigate("/(tabs)") }]);
       } finally {
-        finishSharedFile(uri, success);
+        importInFlightRef.current = false;
+        finishSharedBatch(claim);
         setIsLoading(false);
       }
     })();
-  }, [resolvedSharedPayloads, isResolving, shareError, clearSharedPayloads, router]);
+  }, [sharedPayloads, shareGeneration, shareError, consumeShare, discardUnreadable, router, isLoading, focused, processingBusy]);
 
   useEffect(() => { void cleanupTempCache(); }, []);
 
@@ -71,19 +87,20 @@ export default function HomeScreen() {
     try {
       const result = await pickDocument({ type: ["audio/*", "video/*"], copyToCacheDirectory: false, multiple: true });
       if (result.canceled || !result.assets?.length) return;
-      if (files.length + result.assets.length > MAX_BATCH_FILES) {
-        Alert.alert("Too many files", `Select up to ${MAX_BATCH_FILES} files per batch.`);
-        return;
-      }
+      const seen = new Set(files.map(item => item.uri));
       for (let i = 0; i < result.assets.length; i++) {
         const asset = result.assets[i];
         setLoadingLabel(`Importing ${i + 1} of ${result.assets.length}…`);
-        const imported = await importToDocuments(asset.uri, asset.name);
-        added.push({ uri: imported.uri, name: asset.name, kind: mediaKind(asset.name, asset.mimeType) });
-        // Only remove the picker-owned cache copy, never an arbitrary source URI.
-        if (asset.uri.startsWith(fs.Paths.cache.uri) && asset.uri !== imported.uri) {
-          try { const temp = new fs.File(asset.uri); if (temp.exists) temp.delete(); } catch { /* best effort */ }
+        const detectedKind = mediaKind(asset.name, asset.mimeType);
+        const imported = await importToDocuments(asset.uri, asset.name, undefined, detectedKind);
+        // Count immutable imported identities, not raw picker selections.
+        if (seen.has(imported.uri)) continue;
+        if (seen.size >= MAX_BATCH_FILES) {
+          Alert.alert("Batch is full", `A batch can contain up to ${MAX_BATCH_FILES} unique files. The remaining selection was not added. Any copied files remain in Your files.`);
+          break;
         }
+        seen.add(imported.uri);
+        added.push({ uri: imported.uri, name: asset.name, kind: readImportedMediaKind(imported) ?? detectedKind });
       }
     } catch (importError) {
       setError(importError instanceof Error ? importError : new Error(String(importError)));
@@ -101,6 +118,19 @@ export default function HomeScreen() {
       importInFlightRef.current = false;
       setIsLoading(false);
     }
+  };
+
+  const changeKind = async (file: SelectedMedia) => {
+    if (importInFlightRef.current) return;
+    importInFlightRef.current = true;
+    setLoadingLabel("Updating media type…"); setIsLoading(true);
+    try {
+      const next = file.kind === "audio" ? "video" : "audio";
+      await setImportedMediaKind(new File(file.uri), next);
+      setFiles(previous => previous.map(item => item.uri === file.uri ? { ...item, kind: next } : item));
+    } catch (kindError) {
+      Alert.alert("Could not change media type", kindError instanceof Error ? kindError.message : String(kindError));
+    } finally { importInFlightRef.current = false; setIsLoading(false); }
   };
 
   const proceed = () => {
@@ -122,16 +152,19 @@ export default function HomeScreen() {
               <Text style={styles.eyebrow}>PRIVATE · ON-DEVICE AI</Text>
               <Text style={styles.title}>DeepDenoiser</Text>
             </View>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open your files" onPress={() => router.push("/history")} style={styles.settings}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open your files" disabled={isLoading} accessibilityState={{ disabled: isLoading }} onPress={() => router.push("/history")} style={styles.settings}>
               <Feather name="folder" size={21} color={theme.COLORS.text} />
             </TouchableOpacity>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open settings" onPress={() => setSettingsVisible(true)} style={styles.settings}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open settings" disabled={isLoading} accessibilityState={{ disabled: isLoading }} onPress={() => setSettingsVisible(true)} style={styles.settings}>
               <Feather name="settings" size={21} color={theme.COLORS.text} />
             </TouchableOpacity>
           </View>
           <Text style={styles.subtitle}>Cleaner audio, wherever you are.</Text>
         </View>
 
+        {processingBusy && sharedPayloads.length > 0 && <Text style={styles.actionSubtitle} accessibilityLiveRegion="polite">
+          Shared files are waiting. Finish the current recording or processing first.
+        </Text>}
         {!files.length ? (
           <View style={styles.actions}>
             <TouchableOpacity accessibilityRole="button" style={[styles.heroCard, isLoading && styles.dim]} onPress={handleImportFiles} disabled={isLoading} activeOpacity={0.8}>
@@ -145,10 +178,10 @@ export default function HomeScreen() {
             </TouchableOpacity>
             <TouchableOpacity accessibilityRole="button" style={styles.recordCard} onPress={() => router.push("/recording")} disabled={isLoading}>
               <View style={styles.recordIcon}><Feather name="mic" size={23} color={theme.COLORS.error} /></View>
-              <View style={{ flex: 1 }}><Text style={styles.actionTitle}>Record voice</Text><Text style={styles.actionSubtitle}>Denoise while you speak</Text></View>
+              <View style={{ flex: 1 }}><Text style={styles.actionTitle}>Record voice</Text><Text style={styles.actionSubtitle}>Processed during recording; listen after stopping</Text></View>
               <Feather name="chevron-right" size={20} color={theme.COLORS.subtext} />
             </TouchableOpacity>
-            <View style={styles.privacy}><Feather name="shield" size={16} color={theme.COLORS.success} /><Text style={styles.privacyText}>Your files stay on your device.</Text></View>
+            <View style={styles.privacy}><Feather name="shield" size={16} color={theme.COLORS.success} /><Text style={styles.privacyText}>Processing is on-device. Android backups or device transfers may include app files.</Text></View>
           </View>
         ) : (
           <View style={styles.selection}>
@@ -157,7 +190,12 @@ export default function HomeScreen() {
             {files.map((file, index) => (
               <View style={styles.fileRow} key={`${file.uri}-${index}`}>
                 <View style={styles.fileIcon}><Feather name={file.kind === "video" ? "film" : "music"} size={18} color={theme.COLORS.primary} /></View>
-                <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.fileName}>{file.name}</Text><Text style={styles.fileType}>{file.kind.toUpperCase()} · {index + 1} / {files.length}</Text></View>
+                <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.fileName}>{file.name}</Text>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Change ${file.name} from ${file.kind} to ${file.kind === "audio" ? "video" : "audio"}`}
+                    disabled={isLoading} onPress={() => void changeKind(file)} style={styles.kindControl}>
+                    <Text style={styles.fileType}>{file.kind.toUpperCase()} · Change type · {index + 1} / {files.length}</Text>
+                  </TouchableOpacity>
+                </View>
                 <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Remove ${file.name}`} disabled={isLoading} onPress={() => setFiles((items) => items.filter((_, i) => i !== index))} style={styles.remove}><Feather name="x" size={18} color={theme.COLORS.subtext} /></TouchableOpacity>
               </View>
             ))}
@@ -216,5 +254,6 @@ const styles = StyleSheet.create({
   preview: { backgroundColor: theme.COLORS.surface, borderRadius: 20, padding: 16, marginTop: 8 }, previewLabel: { color: theme.COLORS.subtext, fontSize: 10, fontWeight: "800", letterSpacing: 1, marginBottom: 10 },
   loading: { alignItems: "center", gap: 10, marginTop: 24 }, loadingText: { color: theme.COLORS.subtext, fontSize: 13 },
   footer: { position: "absolute", bottom: 0, left: 0, right: 0, padding: 16, backgroundColor: theme.COLORS.background },
+  kindControl: { minHeight: 40, justifyContent: "center" },
   dim: { opacity: 0.55 },
 });

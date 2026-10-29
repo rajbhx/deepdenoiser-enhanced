@@ -1,0 +1,33 @@
+diff --git a/node_modules/expo-file-system/android/src/main/java/expo/modules/filesystem/FileSystemFileHandle.kt b/node_modules/expo-file-system/android/src/main/java/expo/modules/filesystem/FileSystemFileHandle.kt
+index a39dfeb..8a3a298 100644
+--- a/node_modules/expo-file-system/android/src/main/java/expo/modules/filesystem/FileSystemFileHandle.kt
++++ b/node_modules/expo-file-system/android/src/main/java/expo/modules/filesystem/FileSystemFileHandle.kt
+@@ -2,6 +2,7 @@ package expo.modules.filesystem
+
+ import android.content.ContentResolver
+ import android.net.Uri
++import android.util.Log
+ import expo.modules.kotlin.exception.Exceptions
+ import expo.modules.kotlin.sharedobjects.SharedRef
+ import expo.modules.kotlin.types.Enumerable
+@@ -119,11 +120,18 @@ class FileSystemFileHandle private constructor(
+       var bytesRead = 0
+       while (bytesRead < readAmount) {
+         val result = fileChannel.read(buffer)
+-        if (result == -1) break
++        // A file can be truncated after size() but before the read completes.
++        // Never return the unread, zero-filled remainder as if it were data.
++        // A zero-progress read is also returned to the caller rather than
++        // spinning forever; callers that require exact bytes can retry or fail.
++        if (result <= 0) {
++          Log.w("ExpoFileSystem", "DD_FS_SHORT_READ: returning only bytes actually read")
++          break
++        }
+         bytesRead += result
+       }
+
+-      return buffer.array()
++      return if (bytesRead == readAmount) buffer.array() else buffer.array().copyOf(bytesRead)
+     } catch (e: Exception) {
+       throw UnableToReadHandleException(e.message ?: "unknown error")
+     }

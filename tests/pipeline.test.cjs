@@ -27,7 +27,7 @@ const cache=new Directory(root,'cache'), output=new Directory(root,'output');
 fs.mkdirSync(p(cache));fs.mkdirSync(p(output));
 const filesystem={File,Directory,Paths:{cache,document:output}};
 const queue=load('batchQueue');
-let counter=0,began=0,ended=0,decodes=0,frames=0,cancelAt=Infinity,failDecode=false,currentToken;
+let counter=0,began=0,ended=0,decodes=0,frames=0,cancelAt=Infinity,failDecode=false,shortRead=false,currentToken;
 const decoded=new Map(),denoised=new Map(),finals=new Map();
 const fileFor = map => async key => {const v=map.get(key);return v && v.file.exists?v:null;};
 const cacheApi={
@@ -41,14 +41,16 @@ const cacheApi={
   storeDenoisedPCM:async(key,file)=>denoised.set(key,{file}),
   storeCachedOutput:async(key,file)=>finals.set(key,{file}),
   stagePcmPath:prefix=>`${prefix}_${++counter}.pcm`,
+  pruneRebuildableCache:async()=>{},
   placeOutput:async(file,name)=>{const out=new File(output,`${++counter}_${name}`);await file.move(out);return out;},
 };
 const format={
   decodeToPCMFile:async(input,uri)=>{decodes++; const f=new File(uri); await fs.promises.copyFile(p(input),p(f)); if(failDecode)throw Error('decode failed'); return {file:f,sampleRate:48000};},
   readPCMChunks:async(file,_chunkSize,onChunk)=>{
     const bytes=await fs.promises.readFile(p(file));
-    for(let offset=0;offset<bytes.length;offset+=1400){
-      const length=Math.min(1400,bytes.length-offset), chunk=new Float32Array(length/2);
+    const limit=shortRead?Math.max(0,bytes.length-2):bytes.length;
+    for(let offset=0;offset<limit;offset+=1400){
+      const length=Math.min(1400,limit-offset), chunk=new Float32Array(length/2);
       for(let i=0;i<chunk.length;i++)chunk[i]=bytes.readInt16LE(offset+i*2)/32768;
       await onChunk(chunk,chunk.length);
     }
@@ -85,18 +87,26 @@ function inputFile(name,count){const file=new File(root,name), bytes=Buffer.allo
   assert.equal(result.cached,false); assert.deepEqual(fs.readFileSync(p(result.file)),expected,'identity model must preserve samples and exact duration');
   assert.equal(began,1);assert.equal(ended,1);assert.equal(decodes,1);
   const repeat=await pipeline.processMedia(file,'one.wav',false,settings,{cancelled:false},()=>{});
-  assert.equal(repeat.cached,true);assert.equal(decodes,1);assert.equal(began,1);
+  assert.equal(repeat.cached,true);assert.equal(decodes,1);assert.equal(began,2);assert.equal(ended,2,'cache verification is protected and releases its run guard');
   console.log('PASS end-to-end file framing, exact sample count, persistent output and cache hit');
   const second=inputFile('two.pcm',8000);frames=0;cancelAt=4;currentToken={cancelled:false};
   await assert.rejects(()=>pipeline.processMedia(second,'two.wav',false,settings,currentToken,()=>{}),queue.ProcessingCancelled);
-  assert.equal(began,2);assert.equal(ended,2);
+  assert.equal(began,3);assert.equal(ended,3);
   assert.ok(!fs.readdirSync(p(cache)).some(n=>n.startsWith('stage_dn_')&&!Array.from(denoised.values()).some(e=>e.file.name===n)),'uncommitted denoise stage must be deleted');
   console.log('PASS mid-inference cancellation removes uncommitted PCM and balances model lifetime');
   const third=inputFile('three.pcm',100);frames=0;cancelAt=Infinity;failDecode=true;currentToken={cancelled:false};
   await assert.rejects(()=>pipeline.processMedia(third,'three.wav',false,settings,currentToken,()=>{}),/decode failed/);
-  assert.equal(began,3);assert.equal(ended,3);
+  assert.equal(began,4);assert.equal(ended,4);
   assert.ok(!fs.readdirSync(p(cache)).some(n=>n.startsWith('stage_dec_')&&!Array.from(decoded.values()).some(e=>e.file.name===n)),'partial failed decode must be deleted');
   console.log('PASS native decode failure removes partial file and releases model run');
+  failDecode=false;shortRead=true;const fourth=inputFile('four.pcm',3000);currentToken={cancelled:false};
+  const outputsBefore=fs.readdirSync(p(output));
+  await assert.rejects(()=>pipeline.processMedia(fourth,'four.wav',false,settings,currentToken,()=>{}),/Incomplete denoised audio/);
+  assert.ok(fourth.exists,'the source remains intact after a short read');
+  assert.deepEqual(fs.readdirSync(p(output)),outputsBefore,'no partial output is committed');
+  assert.ok(!fs.readdirSync(p(cache)).some(n=>n.startsWith('stage_dn_')&&!Array.from(denoised.values()).some(e=>e.file.name===n)));
+  shortRead=false;
+  console.log('PASS pipeline refuses incomplete input/output sample counts and preserves original');
   const selection=load('mediaSelection');
   const item={uri:'file:///some/path',name:'without-extension',kind:'video'};
   assert.deepEqual(selection.decodeMediaSelection(encodeURIComponent(JSON.stringify([item]))),[item]);

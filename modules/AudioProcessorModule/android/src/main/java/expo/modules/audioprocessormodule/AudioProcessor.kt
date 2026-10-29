@@ -26,10 +26,8 @@ import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -247,6 +245,35 @@ class MediaProcessor(private val context: Context) : Closeable {
                     }
                     throw error
                 }
+            }
+
+    /** Stream a file into SHA-256 without copying it or blocking the JS thread. */
+    suspend fun fingerprintFile(sourcePath: String): Map<String, Any> =
+            withContext(Dispatchers.IO) {
+                val uri = getSafeUri(sourcePath)
+                fun knownLength(): Long = context.contentResolver
+                        .openAssetFileDescriptor(uri, "r")?.use { it.length }
+                        ?: throw Exception("Could not open file for integrity verification")
+                val before = knownLength()
+                val digest = MessageDigest.getInstance("SHA-256")
+                var total = 0L
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        if (read == 0) throw EOFException("No progress while verifying file integrity")
+                        digest.update(buffer, 0, read)
+                        total += read
+                    }
+                } ?: throw Exception("Could not read file for integrity verification")
+                val after = knownLength()
+                if ((before != AssetFileDescriptor.UNKNOWN_LENGTH && before != total) ||
+                        (after != AssetFileDescriptor.UNKNOWN_LENGTH && after != total)) {
+                    throw Exception("File size changed during integrity verification")
+                }
+                val hex = digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+                mapOf("sha256" to hex, "bytes" to total)
             }
 
     // Returns the byte size of any readable URI (file:// or content://), or -1
@@ -703,6 +730,13 @@ class MediaProcessor(private val context: Context) : Closeable {
                     } ?: throw Exception("Failed to calculate PCM data length: $pcmPath")
                 }
 
+                // This implementation writes mono PCM16 only. Reject empty,
+                // misaligned and >RIFF-limit inputs instead of wrapping lengths.
+                if (channels != 1 || bitDepth != 16 || sampleRate <= 0 || sampleRate > Int.MAX_VALUE / 2) {
+                    throw Exception("WAV conversion requires a valid sample rate and mono 16-bit PCM")
+                }
+                PcmIntegrity.validateMonoPcm16Length(pcmDataLength)
+
                 // ---- Silence trim analysis (16-bit mono PCM only) ----
                 // When enabled, silent runs of at least `minSilenceMs` are removed.
                 // For audio files internal pauses (not just head/tail) are removed,
@@ -732,7 +766,7 @@ class MediaProcessor(private val context: Context) : Closeable {
                     var frameDb = FloatArray(1024)
                     var frameCount = 0
                     val histogram = IntArray(241)
-                    forEachFrameRms(pcmUri, frameSamples) { db ->
+                    forEachFrameRms(pcmUri, pcmDataLength, frameSamples) { db ->
                         if (frameCount == frameDb.size) {
                             frameDb = frameDb.copyOf(frameDb.size * 2)
                         }
@@ -811,34 +845,24 @@ class MediaProcessor(private val context: Context) : Closeable {
                                     trimmed
                             )
                         } else {
-                            var toSkip = trimStartSample * 2
-                            val skipBuffer = ByteArray(8192)
-                            while (toSkip > 0) {
-                                val r =
-                                        inputStream.read(
-                                                skipBuffer,
-                                                0,
-                                                min(skipBuffer.size.toLong(), toSkip).toInt()
-                                        )
-                                if (r == -1) break
-                                toSkip -= r
-                            }
-                            var remaining = trimmedDataLength
-                            val buffer = ByteArray(8192)
-                            while (remaining > 0) {
-                                val r =
-                                        inputStream.read(
-                                                buffer,
-                                                0,
-                                                min(buffer.size.toLong(), remaining).toInt()
-                                        )
-                                if (r == -1) break
-                                outputStream.write(buffer, 0, r)
-                                remaining -= r
-                            }
+                            PcmIntegrity.skipExactly(inputStream, trimStartSample * 2)
+                            PcmIntegrity.copyExactly(inputStream, outputStream, trimmedDataLength)
                         }
                     } ?: throw Exception("Failed to open WAV output stream: $wavPath")
                 } ?: throw Exception("Failed to open PCM input stream: $pcmPath")
+
+                // An input can change between trim analysis and final copying.
+                // Re-check known lengths before reporting the output as ready.
+                context.contentResolver.openAssetFileDescriptor(pcmUri, "r")?.use { afd ->
+                    if (afd.length != AssetFileDescriptor.UNKNOWN_LENGTH && afd.length != pcmDataLength) {
+                        throw Exception("PCM file size changed during WAV conversion")
+                    }
+                } ?: throw Exception("PCM input disappeared during WAV conversion")
+                context.contentResolver.openAssetFileDescriptor(wavUri, "r")?.use { afd ->
+                    if (afd.length != AssetFileDescriptor.UNKNOWN_LENGTH && afd.length != trimmedDataLength + 44L) {
+                        throw Exception("Incomplete WAV output; no file was saved")
+                    }
+                } ?: throw Exception("Could not verify WAV output")
 
                 mapOf(
                         "path" to wavPath,
@@ -854,39 +878,14 @@ class MediaProcessor(private val context: Context) : Closeable {
      */
     private fun forEachFrameRms(
             uri: Uri,
+            expectedBytes: Long,
             frameSamples: Int,
             onFrameDb: (Double) -> Unit
     ) {
-        var sumSq = 0.0
-        var samplesInFrame = 0
         context.contentResolver.openInputStream(uri)?.use { input ->
-            val buffer = ByteArray(64 * 1024)
-            var read: Int
-            while (input.read(buffer).also { read = it } != -1) {
-                var i = 0
-                while (i + 1 < read) {
-                    val lo = buffer[i].toInt() and 0xff
-                    val hi = buffer[i + 1].toInt()
-                    val sample = (lo or (hi shl 8)).toShort().toInt()
-                    sumSq += sample.toDouble() * sample.toDouble()
-                    samplesInFrame++
-                    if (samplesInFrame >= frameSamples) {
-                        onFrameDb(frameRmsDb(sumSq, samplesInFrame))
-                        sumSq = 0.0
-                        samplesInFrame = 0
-                    }
-                    i += 2
-                }
-            }
+            // The helper retains odd bytes across reads and rejects early EOF.
+            PcmIntegrity.forEachFrameRms(input, expectedBytes, frameSamples) { db -> onFrameDb(db) }
         } ?: throw Exception("Failed to open PCM input stream for analysis: $uri")
-        if (samplesInFrame > 0) {
-            onFrameDb(frameRmsDb(sumSq, samplesInFrame))
-        }
-    }
-
-    private fun frameRmsDb(sumSq: Double, sampleCount: Int): Double {
-        val rms = sqrt(sumSq / sampleCount)
-        return 20.0 * log10(rms / 32768.0)
     }
 
     /**
@@ -979,21 +978,13 @@ class MediaProcessor(private val context: Context) : Closeable {
             trimmed: Boolean
     ) {
         val fadeSamples = min(240, max(1, sampleRate / 200)) // 5 ms
-        val bulk = ByteArray(64 * 1024)
-        val skipBuffer = ByteArray(8192)
-        val sampleBuf = ByteArray(2)
         var prevEndSample = -1L
         for ((segIndex, seg) in segments.withIndex()) {
             val startSample = seg.first
             val endSample = seg.second
 
             // Skip the removed pause before this segment.
-            var toSkip = (startSample - prevEndSample - 1) * 2
-            while (toSkip > 0) {
-                val r = input.read(skipBuffer, 0, min(skipBuffer.size.toLong(), toSkip).toInt())
-                if (r == -1) break
-                toSkip -= r
-            }
+            PcmIntegrity.skipExactly(input, (startSample - prevEndSample - 1) * 2)
 
             val segLen = endSample - startSample + 1
             val fadeInLen =
@@ -1007,29 +998,16 @@ class MediaProcessor(private val context: Context) : Closeable {
 
             // Fade-in region (sample-granular so we can ramp).
             for (k in 1..fadeInLen) {
-                writeInt16Sample(output, (readInt16Sample(input, sampleBuf) * k) / fadeInLen)
+                writeInt16Sample(output, (PcmIntegrity.readInt16(input) * k) / fadeInLen)
             }
-            // Bulk middle.
-            var middleBytes = (segLen - fadeInLen - fadeOutLen) * 2
-            while (middleBytes > 0) {
-                val r = input.read(bulk, 0, min(bulk.size.toLong(), middleBytes).toInt())
-                if (r == -1) break
-                output.write(bulk, 0, r)
-                middleBytes -= r
-            }
+            // Bulk middle: an early EOF is failure, never implicit silence.
+            PcmIntegrity.copyExactly(input, output, (segLen - fadeInLen - fadeOutLen) * 2)
             // Fade-out region.
             for (k in fadeOutLen downTo 1) {
-                writeInt16Sample(output, (readInt16Sample(input, sampleBuf) * k) / fadeOutLen)
+                writeInt16Sample(output, (PcmIntegrity.readInt16(input) * k) / fadeOutLen)
             }
             prevEndSample = endSample
         }
-    }
-
-    private fun readInt16Sample(input: InputStream, buf: ByteArray): Int {
-        val lo = input.read()
-        val hi = input.read()
-        if (lo == -1 || hi == -1) return 0
-        return (lo or (hi shl 8)).toShort().toInt()
     }
 
     private fun writeInt16Sample(output: OutputStream, v: Int) {
@@ -1316,29 +1294,27 @@ class MediaProcessor(private val context: Context) : Closeable {
                             }
 
                             val id = String(chunkId, 0, 4, Charsets.US_ASCII)
-                            val size = readInt32LE(chunkSizeBytes, 0)
-                            val paddedSize = size + (size % 2)
+                            val size = readInt32LE(chunkSizeBytes, 0).toLong() and 0xFFFFFFFFL
+                            val paddedSize = size + (size % 2L)
 
                             when (id) {
                                 "fmt " -> {
-                                    val readFmtSize = minOf(size, 16)
-                                    val fmtRaw = ByteArray(readFmtSize)
-                                    readFully(stream, fmtRaw)
-
-                                    val fmtData = if (readFmtSize < 16) {
-                                        ByteArray(16).also {
-                                            System.arraycopy(fmtRaw, 0, it, 0, readFmtSize)
-                                        }
-                                    } else fmtRaw
-
+                                    if (size < 16) throw Exception("Invalid WAV fmt chunk in $inputPath")
+                                    val fmtData = ByteArray(16)
+                                    readFully(stream, fmtData)
                                     audioFormat = readInt16LE(fmtData, 0)
-                                    channels = readInt16LE(fmtData, 2).coerceAtLeast(1)
+                                    channels = readInt16LE(fmtData, 2)
                                     sampleRate = readInt32LE(fmtData, 4)
-                                    bitDepth = readInt16LE(fmtData, 14).coerceAtLeast(8)
+                                    bitDepth = readInt16LE(fmtData, 14)
+                                    if (channels !in 1..32 || sampleRate <= 0 ||
+                                            bitDepth !in listOf(8, 16, 24, 32) ||
+                                            (audioFormat != 1 && !(audioFormat == 3 && bitDepth == 32))) {
+                                        throw Exception("Unsupported WAV sample format in $inputPath")
+                                    }
                                     foundFmt = true
 
-                                    val skipBytes = paddedSize - readFmtSize
-                                    if (skipBytes > 0) skipExact(stream, skipBytes.toLong())
+                                    val skipBytes = paddedSize - 16L
+                                    if (skipBytes > 0) skipExact(stream, skipBytes)
                                 }
                                 "data" -> {
                                     if (!foundFmt) {
@@ -1346,36 +1322,37 @@ class MediaProcessor(private val context: Context) : Closeable {
                                     }
                                     foundData = true
 
-                                    val bytesPerSample = (bitDepth / 8).coerceAtLeast(1)
+                                    val bytesPerSample = bitDepth / 8
                                     val frameSize = channels * bytesPerSample
-                                    val buffer = ByteArray(8192)
-                                    var remaining = size.toLong() and 0xFFFFFFFFL
-
+                                    if (size == 0L || size % frameSize != 0L) {
+                                        throw Exception("Invalid or incomplete WAV data frames in $inputPath")
+                                    }
+                                    // Buffer and each request must end on a complete frame,
+                                    // including for 24-bit and multichannel inputs.
+                                    val buffer = ByteArray((8192 / frameSize) * frameSize)
+                                    var remaining = size
                                     while (remaining > 0) {
-                                        val toRead =
-                                            minOf(buffer.size.toLong(), (remaining / frameSize) * frameSize)
-                                                .toInt()
-                                        if (toRead == 0) break
-
+                                        val toRead = minOf(buffer.size.toLong(), remaining).toInt()
                                         var totalRead = 0
                                         while (totalRead < toRead) {
                                             val n = stream.read(buffer, totalRead, toRead - totalRead)
-                                            if (n == -1) throw EOFException("Unexpected end of WAV data in $inputPath")
+                                            if (n <= 0) throw EOFException("Unexpected end of WAV data in $inputPath")
                                             totalRead += n
                                         }
-
                                         val frames = totalRead / frameSize
                                         processPcmFrames(
                                             buffer, frames, frameSize, channels, bytesPerSample,
                                             bitDepth, audioFormat, outputStream, inputPath
                                         )
-                                        remaining -= (frames * frameSize).toLong()
+                                        remaining -= totalRead.toLong()
                                     }
 
-                                    if (size % 2 != 0) stream.read()
+                                    if (size % 2L != 0L && stream.read() == -1) {
+                                        throw EOFException("Missing WAV data padding in $inputPath")
+                                    }
                                 }
                                 else -> {
-                                    if (paddedSize > 0) skipExact(stream, paddedSize.toLong())
+                                    if (paddedSize > 0) skipExact(stream, paddedSize)
                                 }
                             }
                         }
@@ -1405,7 +1382,7 @@ class MediaProcessor(private val context: Context) : Closeable {
             for (c in 0 until channels) {
                 val sampleOffset = offset + c * bytesPerSample
                 val sample = when {
-                    bitDepth <= 8 -> (buffer[sampleOffset].toInt() and 0xFF) - 128L
+                    bitDepth <= 8 -> ((buffer[sampleOffset].toInt() and 0xFF) - 128L) shl 8
                     bitDepth <= 16 -> readInt16LE(buffer, sampleOffset).toLong()
                     bitDepth <= 24 -> {
                         val v = (buffer[sampleOffset].toInt() and 0xFF) or
@@ -1436,18 +1413,13 @@ class MediaProcessor(private val context: Context) : Closeable {
         var offset = 0
         while (offset < buffer.size) {
             val read = stream.read(buffer, offset, buffer.size - offset)
-            if (read == -1) throw EOFException("Unexpected end of stream")
+            if (read <= 0) throw EOFException("Unexpected end of stream")
             offset += read
         }
     }
 
     private fun skipExact(stream: InputStream, count: Long) {
-        var remaining = count
-        while (remaining > 0) {
-            val skipped = stream.skip(remaining)
-            if (skipped <= 0) throw EOFException("Unexpected end of stream during skip")
-            remaining -= skipped
-        }
+        PcmIntegrity.skipExactly(stream, count)
     }
 
     private fun readInt16LE(buffer: ByteArray, offset: Int): Int {

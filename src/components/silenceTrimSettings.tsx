@@ -1,9 +1,8 @@
 import * as theme from "@/src/constants/theme";
 import type { SilenceTrimSettings } from "@/src/scripts/silenceTrim";
 import Feather from "@expo/vector-icons/Feather";
-import { Host, Switch } from "@expo/ui/jetpack-compose";
 import React from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
 import CustomSlider from "./customSlider";
 import InfoBubble from "./InfoBubble";
 
@@ -36,7 +35,7 @@ export default function SilenceTrimSettings({
               <Text style={styles.betaText}>BETA</Text>
             </View>
             <InfoBubble
-              text={`Removes quiet pauses from the denoised audio, which shortens the duration.\n\nAuto: analyzes the audio and picks a threshold.\nManual: you set the threshold and minimum pause length.\n\nOnly pauses that are quiet enough AND long enough are removed.`}
+              text={`Removes quiet sections and shortens the audio. It can cut quiet speech or meaningful pauses, so listen to the result and keep the original.\n\nAuto: analyzes the audio and picks a threshold.\nManual: you set the threshold and minimum pause length.\n\nOnly sections that are quiet enough AND long enough are removed.`}
             >
               <Feather
                 name="help-circle"
@@ -45,29 +44,24 @@ export default function SilenceTrimSettings({
               />
             </InfoBubble>
           </View>
-          <Host matchContents style={{ width: 52, height: 32 }} colorScheme="dark">
-            <Switch
-              value={settings.enabled}
-              onCheckedChange={(value) => onChange({ ...settings, enabled: value })}
-              colors={{
-                uncheckedTrackColor: theme.COLORS.border,
-                checkedTrackColor: theme.COLORS.primary,
-                checkedThumbColor: theme.COLORS.text,
-                uncheckedThumbColor: theme.COLORS.text,
-              }}
-            />
-          </Host>
+          <Switch accessibilityLabel="Trim silence" value={settings.enabled}
+            onValueChange={(value) => onChange({ ...settings, enabled: value })}
+            trackColor={{ false: theme.COLORS.border, true: theme.COLORS.primary }}
+            thumbColor={settings.enabled ? theme.COLORS.background : theme.COLORS.text} />
         </View>
       </View>
 
       {settings.enabled && (
         <View>
+          <Text style={styles.warning}>Trimming can remove quiet speech or important pauses. Keep the original and check the result.</Text>
           <View style={styles.modeRow}>
             <TouchableOpacity
               style={[
                 styles.modePill,
                 settings.mode === "auto" && styles.modePillActive,
               ]}
+              accessibilityRole="button"
+              accessibilityState={{ selected: settings.mode === "auto" }}
               onPress={() => setMode("auto")}
               activeOpacity={0.7}
             >
@@ -85,6 +79,8 @@ export default function SilenceTrimSettings({
                 styles.modePill,
                 settings.mode === "manual" && styles.modePillActive,
               ]}
+              accessibilityRole="button"
+              accessibilityState={{ selected: settings.mode === "manual" }}
               onPress={() => setMode("manual")}
               activeOpacity={0.7}
             >
@@ -133,6 +129,7 @@ export default function SilenceTrimSettings({
 }
 
 const styles = StyleSheet.create({
+  warning: { color: theme.COLORS.subtext, fontSize: 12, lineHeight: 18, marginBottom: 12 },
   settingItem: {
     marginTop: theme.SPACING.small,
   },
@@ -156,6 +153,8 @@ const styles = StyleSheet.create({
   },
   modePill: {
     flex: 1,
+    minHeight: 44,
+    justifyContent: "center",
     paddingVertical: 10,
     borderRadius: 12,
     borderWidth: 1,

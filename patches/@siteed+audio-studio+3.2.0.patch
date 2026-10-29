@@ -310,15 +310,30 @@
                  })
 --- a/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioRecordingService.kt
 +++ b/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioRecordingService.kt
-@@ -101,7 +101,7 @@
-                         Log.d(Constants.TAG, "Successfully stopped recording on task removed")
-                         cleanup()
+@@ -3,2 +3,3 @@
+ import android.app.Service
++import android.app.PendingIntent
+ import android.content.Context
+@@ -56,5 +57,11 @@
+-                // Create minimal silent notification with minimal text
++                // The microphone must never be represented by a blank notification.
++                val openApp = packageManager.getLaunchIntentForPackage(packageName)?.let { launch ->
++                    PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
++                }
+                 val notification = NotificationCompat.Builder(this, "recording_service")
+-                    .setContentTitle(" ")  // Space character instead of empty string
+-                    .setContentText(" ")   // Space character instead of empty string
++                    .setContentTitle("Recording in progress")
++                    .setContentText("Tap to return to DeepDenoiser")
++                    .setContentIntent(openApp)
++                    .setCategory(NotificationCompat.CATEGORY_SERVICE)
++                    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                     .setSmallIcon(R.drawable.ic_microphone)
+@@ -103,3 +110,3 @@
                      }
 -                    override fun reject(code: String, message: String?, cause: Throwable?) {
 +                    override fun reject(code: String?, message: String?, cause: Throwable?) {
                          Log.e(Constants.TAG, "Failed to stop recording on task removed: $message")
-                         cleanup()
-                     }
 --- a/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/RecordingActionReceiver.kt
 +++ b/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/RecordingActionReceiver.kt
 @@ -41,7 +41,7 @@

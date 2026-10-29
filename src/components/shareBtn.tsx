@@ -29,6 +29,9 @@ const ShareBtn: React.FC<ShareBtnProps> = ({ uri, beforeShare }) => {
     };
 
     return <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel="Share file"
+        style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}
         onPress={handleShare}
         activeOpacity={0.7}
     >
