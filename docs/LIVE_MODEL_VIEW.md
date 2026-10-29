@@ -1,0 +1,25 @@
+# DeepDenoiser 2.0.5 — live model view
+
+## What the screen shows
+
+During microphone recording, the application already gives the bundled DeepFilterNet model 512-sample frames at 48 kHz. The recorder writes the native original separately and places live cleaned audio into its existing temporary stream. The new view observes the **accepted stream**; it does not turn the microphone stream or ONNX execution into an explanatory model.
+
+- **Mic input** and **Cleaned output** use actual sample-index-aligned data from the recorder's `AlignedDenoiseStream`. The output includes the selected dry/wet strength mix and precedes any optional silence trim. The native WAV is verified/reconciled after Stop; a live chart is not evidence that final recovery or export succeeded.
+- Each chart column is a 1024-sample Hann-windowed display FFT of the same time interval in the input and output. Sixteen approximately logarithmic bands cover roughly 90 Hz–12 kHz. The strongest frequency bin within a band is displayed, on the **same fixed -80 to 0 dBFS approximate scale** for both charts. Bright means stronger signal; it does not necessarily mean speech, noise or quality.
+- **Frequency change** compares those band levels: teal is lower, amber higher, neutral is less than 3 dB of displayed change. It is not a separate noise track, a mask from inside the model, or a measure of enhancement quality. Changes can include speech, phase/level effects and analysis-window differences.
+- A logical model-frame count advances only after a successful `processFrame`, including warm-up frames, not for every internal runtime/provider invocation. The queue metric is the approximate duration of accepted in-flight and waiting samples. It is **not** end-to-end microphone latency or proof that every native sample has been saved.
+- A new issue notification displays live-queue overflow or asynchronous failure immediately. Once a queue stops accepting a prefix, the existing Stop flow still attempts reconciliation or processing from the native WAV. This attempt can also fail; no recording recovery or output is guaranteed by the graph.
+
+## Safety and resource limits
+
+- Display analysis is read-only. It never modifies the input/output arrays, model weights, model state, strength, sample rate, saved file format or trim policy. This source change does not repair the WAV-header or trim-edge issues identified in [the audit](AUDIT_2026-10-29.md).
+- An in-memory sample-indexed ring holds up to five seconds of input and output each (about 1.92 MB of float buffers in total), and 32 spectrogram columns cover approximately four seconds. Only matched windows are compared. If data is missing, delayed or intentionally skipped, its column remains blank.
+- At most eight analyses are scheduled per audio second and the small display panel refreshes five times per second. The next analysis is skipped if another is pending or the live queue contains at least half a second of audio. FFT work is deferred on the JS event loop; it is **not** a separate native worker and can still consume CPU or affect scheduling. The user can hide the charts; analysis also pauses while the app is backgrounded. Frame counting continues only while the OS permits the recording stream to run; visible metrics refresh again when foregrounded.
+- Audio samples used for visualization stay in process memory and are not newly written to a separate file or uploaded. Hiding the display invalidates its history; memory buffers can remain allocated until released or garbage-collected. Existing recording, storage, Android backup, logs and diagnostics behavior are otherwise unchanged.
+- React Native native-stack content and the Android `AppTheme` window background use the same dark color. This targets the reported light transition but does not prove the actual phone flash is fixed.
+
+## Tests and remaining validation
+
+Host tests check tone/silence FFT calibration, read-only arrays, input/output delay alignment with a delayed identity model, blank gaps, bounded history, toggle/background behavior, asynchronous queue failure, queue overload and model-load Retry. The real bundled ONNX model was exercised through Node CPU with the display enabled, hidden and absent for the same fixed input and strength; tested output samples and recurrent state were bit-identical. Those tests substitute native recording/storage and do not certify all inputs, Android providers or the target device.
+
+On the OnePlus 7 with disposable audio, verify: cold/warm recorder transitions; microphone permission; start/pause/resume/stop; all three frequency displays with voice and steady background sound; model-frame and queue status; induced model/queue failure when possible; final A/B playback and export; long recordings; hide/show; screen-off, interruptions and relevant battery restrictions. Compare CPU/thermal/battery and responsiveness with charts shown and hidden. Back up important recordings before an update, and never uninstall or clear app data to force one. No actual device, upgrade or background-recording guarantee is implied by the host checks.

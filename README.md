@@ -1,8 +1,12 @@
-# DeepDenoiser Enhanced 2.0.4
+# DeepDenoiser Enhanced 2.0.5
 
 Offline AI audio and video denoising for Android using **DeepFilterNet3** and **ONNX Runtime**. This is a privacy-focused fork of [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser).
 
-**Current audit:** [2.0.4 audit and source cleanup](docs/AUDIT_2026-10-29.md) documents two open recording-recovery and optional silence-trim risks, device-test gaps and dependency findings. The cleanup does not create a new APK.
+**Current audit:** [2.0.4 audit and source cleanup](docs/AUDIT_2026-10-29.md) documents two still-open recording-recovery and optional silence-trim risks, device-test gaps and dependency findings. The earlier cleanup itself did not create an APK.
+
+## Live model view (2.0.5 test update)
+
+The recorder can display actual, sample-aligned input and cleaned-output frequency activity, the change between them, successful model frame count, and approximate queued audio. This is an independent display analysis—not the model's internal reasoning or a noise-only meter. It can be hidden and suspends while backgrounded; skipped analysis is shown as blank rather than invented. Queue errors/overload now surface on screen, a failed model load offers Retry, and Android window/native-stack backgrounds are set dark for the reported transition flash. The model, inference arithmetic, format and recovery implementation are unchanged. See [live view design, limits and tests](docs/LIVE_MODEL_VIEW.md). Real OnePlus performance, installation, flash and background behavior still require device testing.
 
 ## Quality-preserving optimization (2.0.4 testing build)
 

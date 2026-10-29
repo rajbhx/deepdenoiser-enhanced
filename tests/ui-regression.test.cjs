@@ -18,6 +18,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
 const S={};
 const theme={COLORS:{primary:'#00E5FF',background:'#0F172A',surface:'#1E293B',text:'#F8FAFC',subtext:'#94A3B8',success:'#10B981',error:'#EF4444',border:'#334155',white:'#FFFFFF'},SPACING:{small:8,medium:16},FONT_SIZE:{body:16,small:14,heading:20},Styles:new Proxy({}, {get:()=>({})})};
 const RN={View:'View',Text:'Text',Pressable:'Pressable',TouchableOpacity:'TouchableOpacity',ScrollView:'ScrollView',Modal:'Modal',
+  AppState:{currentState:'active',addEventListener:(_event,callback)=>{S.appStateCallback=callback;return{remove(){S.appStateCallback=null}}}},
   StyleSheet:{create:x=>x,absoluteFill:{}},useWindowDimensions:()=>({width:320,height:480}),
   Alert:{alert:(...args)=>S.alerts.push(args)},
   Animated:{View:'Animated.View',Value:class{constructor(v){this.value=v}setValue(v){this.value=v}},timing:()=>({start(){},stop(){}}),sequence:()=>({start(){},stop(){}}),loop:()=>({start(){},stop(){}})},
@@ -37,7 +38,7 @@ const settingsMock={ATTEN_PRESET_DB:{light:20,medium:10,strong:5,max:0},getSetti
 const denoiser={createStream:value=>(S.streamStrength=value,{}),processFrame:async(_s,x)=>x};
 const singleton={beginRun:()=>{S.began++},endRun:()=>{S.ended++},isProcessingMedia:()=>false,getEngineLabel:()=> 'not-loaded',resetDenoiser:async()=>{},getDenoiser:()=>S.getDenoiser()};
 const nativeSafety={assertNativeRecorderIdle:()=>{S.statusChecks++;if(!S.nativeIdle)throw new Error('Native writer active')},
-  BoundedRecordingQueue:class{constructor(){this.error=null;this.overloaded=false}async drain(){}},
+  BoundedRecordingQueue:class{constructor(_a,_b,_consume,onIssue){this.error=null;this.overloaded=false;this.onIssue=onIssue}snapshot(){return{pendingSamples:0,pendingChunks:0,overloaded:this.overloaded,hasError:!!this.error}}enqueue(){return true}fail(error){this.error=error;this.onIssue?.('error')}async drain(){}},
   ensureRecordingWavHeader:()=>{if(S.invalidRecording)throw new Error('Recording has no WAV header');return 56},
   reconcileRecording:async()=>false,recordingsDir:()=>({uri:'file:///doc/recordings'})};
 const cacheMock={cleanupTempCache:async()=>{},placeOutput:async f=>f,readImportedMediaKind:f=>S.kinds.get(f.uri)||null,
@@ -53,6 +54,7 @@ function getVideoPlayer(uri){
 }
 const mocks={
   'react-native':RN,'react-native-reanimated':reanimated,'react-native-gesture-handler':GH,
+  'react-native-svg':{__esModule:true,default:'Svg',Path:'Path'},
   'react-native-safe-area-context':{SafeAreaView:'SafeAreaView',useSafeAreaInsets:()=>({top:0,bottom:0})},
   '@expo/vector-icons/Feather':'Feather','@expo/vector-icons':{Feather:'Feather'},
   '@expo/ui/jetpack-compose':{Host:'Host',LoadingIndicator:'LoadingIndicator',Switch:'Switch'},
@@ -62,10 +64,10 @@ const mocks={
   'expo-audio':{requestRecordingPermissionsAsync:async()=>({granted:true}),useAudioPlayer:getAudioPlayer,useAudioPlayerStatus:player=>S.audioStatus[player.uri]},
   'expo-video':{useVideoPlayer:(uri,setup)=>{const p=getVideoPlayer(uri);setup?.(p);return p},VideoView:'VideoView'},
   'expo-constants':{__esModule:true,default:{expoConfig:{version:'2.0.1'}}},
-  '@siteed/audio-studio':{useAudioRecorder:()=>{const [recording,setRecording]=React.useState(false);return{
-    isRecording:recording,isPaused:false,durationMs:0,
+  '@siteed/audio-studio':{AudioStudioModule:{status:()=>({isRecording:!S.nativeIdle,isPaused:false,isWriterActive:!S.nativeIdle})},useAudioRecorder:()=>{const [recording,setRecording]=React.useState(false),[paused,setPaused]=React.useState(false);return{
+    isRecording:recording,isPaused:paused,durationMs:0,
     startRecording:async config=>{const result=await S.nativeStart(config);setRecording(true);return result},
-    stopRecording:async()=>{const result=await S.nativeStop();setRecording(false);return result},pauseRecording:async()=>{},resumeRecording:async()=>{},
+    stopRecording:async()=>{const result=await S.nativeStop();setRecording(false);setPaused(false);return result},pauseRecording:async()=>setPaused(true),resumeRecording:async()=>setPaused(false),
   }}},
   '@/src/constants/theme':theme,'@/assets/model/model_metadata.json':{hop_size:480,algorithmic_delay_samples:0},
   '@/src/components/advanceSettings':'AdvanceSettings','@/src/components/audioPlayer':'AudioPlayer','@/src/components/CompareAudioPlayer':'CompareAudioPlayer',
@@ -78,7 +80,7 @@ const mocks={
   '@/src/scripts/analytics':{trackAppEvent(){},trackAppError(){}},
   '@/src/scripts/diagnostics':{recordDiagnostic(){},recordDiagnosticError(){}},
   '@/src/scripts/silenceTrim':{DEFAULT_SILENCE_TRIM:{enabled:false,mode:'auto',thresholdDb:-40,minSilenceMs:500}},
-  '@/src/scripts/formatHandler':{PCMtoWav:async()=>({file:new FakeFile('file:///cache/partial.wav')}),writePCMChunk:async()=>{},saveToDevice:()=>S.save(),savedMediaLocation:()=> 'Music/DeepDenoiser Audio'},
+  '@/src/scripts/formatHandler':{PCMtoWav:async()=>({file:new FakeFile('file:///cache/partial.wav')}),writePCMChunk:(...args)=>S.writePCMChunk(...args),saveToDevice:()=>S.save(),savedMediaLocation:()=> 'Music/DeepDenoiser Audio'},
   '@/src/scripts/processMedia':{processMedia:(...args)=>S.processMedia(...args)},
   '@/src/scripts/privateMedia':{listPrivateMedia:()=>S.privateMedia.filter(item=>item.file.exists).map(item=>{const kind=S.kinds.get(item.file.uri);return item.group==='imports'&&kind?{...item,kindKnown:true,video:kind==='video'}:item})},
   '@/src/scripts/documentPicker':{pickDocument:()=>S.pickDocument()},
@@ -92,7 +94,7 @@ Module._load=function(request,parent,isMain){if(Object.hasOwn(mocks,request))ret
 function reset(){
   Object.assign(S,{alerts:[],routes:[],files:new Map(),kinds:new Map(),imports:[],params:{},prevent:null,audioStatus:{},players:{},videos:{},plays:0,seeks:[],retries:0,began:0,ended:0,statusChecks:0,nativeIdle:true,invalidRecording:false,privateMedia:[],streamStrength:null,focused:true,processingBusy:false});
   S.getSettings=async()=>defaultSettings();S.updateSettings=async patch=>({...defaultSettings(),...patch});S.getDenoiser=async()=>denoiser;
-  S.nativeStart=async()=>({fileUri:'file:///doc/recordings/test.wav'});S.nativeStop=async()=>({fileUri:'file:///doc/recordings/test.wav'});
+  S.nativeStart=async()=>({fileUri:'file:///doc/recordings/test.wav'});S.nativeStop=async()=>({fileUri:'file:///doc/recordings/test.wav'});S.writePCMChunk=async()=>{};
   S.processMedia=async()=>({file:new FakeFile('file:///doc/denoised/out.wav'),seconds:1,cached:false,trimEnabled:false});S.pickDocument=async()=>({canceled:true});S.save=async()=> 'content://saved';
   S.discards=0;S.shareImports=0;S.importSharedMedia=async()=>{S.shareImports++;return [{uri:'file:///doc/imports/shared',name:'shared.wav',kind:'audio'}]};
   S.share={payloads:[],generation:'',error:null,consume(){},discardUnreadable(){S.discards++}};
@@ -156,6 +158,59 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   assert.equal(tree.root.findByType('CustomSlider').parent.props.pointerEvents,'none','settings are blocked while native start is pending');
   await act(async()=>starting.resolve({fileUri:'file:///doc/recordings/test.wav'}));await unmount(tree);
   console.log('PASS recording startup visibly disables settings and shows progress');
+
+  reset();let modelAttempts=0;S.getDenoiser=async()=>{if(++modelAttempts===1)throw new Error('synthetic model load error');return denoiser};
+  const savedConsoleError=console.error;console.error=()=>{};tree=await mount(Recording);console.error=savedConsoleError;
+  assert.equal(byLabel(tree,'Start recording').props.disabled,true);assert.ok(allText(tree.root).includes('Denoiser unavailable'));
+  await act(async()=>tree.root.findByType('ErrorModal').props.onClose());
+  await click(byLabel(tree,'Retry preparing denoiser'));
+  assert.equal(modelAttempts,2);assert.equal(byLabel(tree,'Start recording').props.disabled,false);assert.ok(allText(tree.root).includes('Ready to record'));await unmount(tree);
+  console.log('PASS recorder shows a retry after model initialization fails and can recover');
+
+  // Use the real bounded queue with mocked native modules to exercise an async write failure.
+  const actualSafety=require(path.join(root,'src/scripts/recordingSafety.ts'));
+  mocks['@/src/scripts/recordingSafety']={...nativeSafety,BoundedRecordingQueue:actualSafety.BoundedRecordingQueue};
+  const recPath=path.join(root,'src/app/recording/index.tsx');delete require.cache[require.resolve(recPath)];
+  const QueueRecording=require(recPath).default;
+  reset();let liveConfig,postStopRuns=0;
+  S.nativeStart=async config=>{liveConfig=config;S.nativeIdle=false;S.files.set('file:///doc/recordings/test.wav',{size:100});return{fileUri:'file:///doc/recordings/test.wav'}};
+  S.nativeStop=async()=>{S.nativeIdle=true;return{fileUri:'file:///doc/recordings/test.wav'}};
+  S.writePCMChunk=async()=>{throw new Error('synthetic asynchronous PCM write failure')};
+  S.processMedia=async()=>{postStopRuns++;return{file:new FakeFile('file:///doc/denoised/out.wav'),seconds:1,cached:false,trimEnabled:false}};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+  let controlAncestor=byLabel(tree,'Stop and save recording').parent;
+  while(controlAncestor){assert.notEqual(controlAncestor.type,'ScrollView','Stop must remain outside the scrolling chart');controlAncestor=controlAncestor.parent}
+  await click(byLabel(tree,'Pause recording'));assert.ok(byLabel(tree,'Resume recording'));
+  await click(byLabel(tree,'Resume recording'));assert.ok(byLabel(tree,'Pause recording'));
+  await act(async()=>{await liveConfig.onAudioStream({data:new Float32Array(480)});await new Promise(resolve=>setTimeout(resolve,0))});
+  assert.ok(allText(tree.root).includes('live cleaning interrupted'));assert.ok(allText(tree.root).includes('Live cleaning stopped'));
+  await click(byLabel(tree,'Stop and save recording'));assert.equal(postStopRuns,1,'async error triggers original-based fallback');
+  assert.ok(S.files.has('file:///doc/recordings/test.wav'),'fallback must retain the original');await unmount(tree);
+  console.log('PASS asynchronous live-write failure is visible and Stop attempts to process the original');
+
+  reset();S.nativeStart=async config=>{liveConfig=config;S.nativeIdle=false;return{fileUri:'file:///doc/recordings/test.wav'}};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+  await act(async()=>{await liveConfig.onAudioStream({data:new Float32Array(48000*4+1)})});
+  assert.ok(allText(tree.root).includes('Live queue is full'));assert.ok(allText(tree.root).includes('live cleaning interrupted'));
+  S.nativeIdle=true;await unmount(tree);mocks['@/src/scripts/recordingSafety']=nativeSafety;
+  console.log('PASS overloaded live queue reports a truthful status without changing original capture');
+
+  const liveView=require(path.join(root,'src/components/LiveModelView.tsx'));
+  const plotColumn={index:5,input:Array(16).fill(2),output:Array(16).fill(1),change:Array(16).fill(-1)};
+  const paths=liveView.spectrumPaths([plotColumn],5,'input');assert.match(paths[2],/M31 15h1v1h-1z/);assert.equal(paths[1],'');
+  assert.match(liveView.liveModelStatus({modelFrames:9},null,'error',false),/stopped/i);
+  assert.match(liveView.liveModelStatus({modelFrames:9},{pendingSamples:48000,pendingChunks:1,overloaded:false,hasError:false},null,false),/behind/i);
+  reset();const enableCalls=[];
+  const fakeMonitor={setEnabled:v=>enableCalls.push(v),snapshot:()=>({modelFrames:9,latestIndex:5,columns:[plotColumn],visualizationAvailable:true})};
+  const fakeQueue={snapshot:()=>({pendingSamples:480,pendingChunks:1,overloaded:false,hasError:false})};
+  tree=await mount(liveView.default,{monitor:fakeMonitor,queue:fakeQueue,issue:null,paused:false,strength:'Strong'});
+  assert.ok(allText(tree.root).includes('Processing live audio'));assert.ok(allText(tree.root).includes('Changes can include speech'));
+  await click(byLabel(tree,'Hide live frequency displays'));assert.equal(enableCalls.at(-1),false);
+  await act(async()=>S.appStateCallback('background'));await act(async()=>S.appStateCallback('active'));assert.equal(enableCalls.at(-1),false,'hidden graphs stay off after foregrounding');
+  await click(byLabel(tree,'Show live frequency displays'));assert.equal(enableCalls.at(-1),true);
+  await act(async()=>S.appStateCallback('background'));assert.equal(enableCalls.at(-1),false);
+  await act(async()=>S.appStateCallback('active'));assert.equal(enableCalls.at(-1),true);await unmount(tree);
+  console.log('PASS live view displays honest statuses and stops visual work when hidden or backgrounded');
 
   reset();const pendingStart=deferred();let cleanupStops=0;S.nativeStart=()=>{S.nativeIdle=false;return pendingStart.promise};
   S.nativeStop=async()=>{cleanupStops++;S.nativeIdle=true;return{fileUri:'file:///doc/recordings/test.wav'}};

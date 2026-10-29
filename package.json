@@ -1,7 +1,7 @@
 {
   "name": "deepdenoiser",
   "main": "expo-router/entry",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "onnxruntimeExtensionsEnabled": "false",
   "scripts": {
     "start": "bunx expo start",
@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit",
     "test:real-model": "node tests/real-model.test.cjs && node tests/real-preallocation.test.cjs",
     "test:document-picker": "node tests/documentPicker.test.cjs",
-    "test": "node tests/diagnostics.test.cjs && node tests/diagnostics-ui.test.cjs && node tests/pcm-integrity.test.cjs && node tests/documentPicker.test.cjs && node tests/resampler.test.cjs && node tests/stream-optimization.test.cjs && node tests/quality-safe-frame.test.cjs && node tests/icon-bundle.test.cjs && node tests/dependency-security.test.cjs && node tests/queue-and-compare.test.cjs && node tests/storage-and-processing.test.cjs && node tests/settings-and-model.test.cjs && node tests/pipeline.test.cjs && node tests/recording-safety.test.cjs && node tests/export-and-history.test.cjs && node tests/signing-config.test.cjs && node tests/native-source-contract.test.cjs && node tests/ux-logic.test.cjs && node tests/ui-regression.test.cjs && node tests/share-lifecycle.test.cjs"
+    "test": "node tests/diagnostics.test.cjs && node tests/diagnostics-ui.test.cjs && node tests/pcm-integrity.test.cjs && node tests/documentPicker.test.cjs && node tests/resampler.test.cjs && node tests/stream-optimization.test.cjs && node tests/quality-safe-frame.test.cjs && node tests/icon-bundle.test.cjs && node tests/dependency-security.test.cjs && node tests/queue-and-compare.test.cjs && node tests/storage-and-processing.test.cjs && node tests/settings-and-model.test.cjs && node tests/pipeline.test.cjs && node tests/recording-safety.test.cjs && node tests/live-model-monitor.test.cjs && node tests/export-and-history.test.cjs && node tests/signing-config.test.cjs && node tests/native-source-contract.test.cjs && node tests/ux-logic.test.cjs && node tests/ui-regression.test.cjs && node tests/share-lifecycle.test.cjs"
   },
   "dependencies": {
     "@expo/ui": "~57.0.11",
@@ -51,6 +51,7 @@
     "react-native-reanimated": "4.5.1",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
+    "react-native-svg": "15.15.4",
     "react-native-web": "~0.21.2",
     "react-native-worklets": "0.10.1"
   },

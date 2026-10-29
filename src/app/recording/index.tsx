@@ -1,5 +1,6 @@
 import AudioPlayer from "@/src/components/audioPlayer";
 import CompareAudioPlayer from "@/src/components/CompareAudioPlayer";
+import LiveModelView from "@/src/components/LiveModelView";
 import metadata from "@/assets/model/model_metadata.json";
 import { placeOutput } from "@/src/scripts/denoiseCache";
 import CustomSlider from "@/src/components/customSlider";
@@ -11,7 +12,8 @@ import * as theme from "@/src/constants/theme";
 import { trackAppError, trackAppEvent } from "@/src/scripts/analytics";
 import type { DeepFilterNet } from "@/src/scripts/Denoiser";
 import { AlignedDenoiseStream } from "@/src/scripts/alignedDenoiseStream";
-import { assertNativeRecorderIdle, BoundedRecordingQueue, ensureRecordingWavHeader, reconcileRecording, recordingsDir } from "@/src/scripts/recordingSafety";
+import { assertNativeRecorderIdle, BoundedRecordingQueue, ensureRecordingWavHeader, reconcileRecording, recordingsDir, type RecordingQueueIssue } from "@/src/scripts/recordingSafety";
+import { LiveModelMonitor } from "@/src/scripts/liveModelMonitor";
 import { processMedia } from "@/src/scripts/processMedia";
 import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
 import { recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
@@ -71,6 +73,7 @@ export default function RecordingScreen() {
   } = useAudioRecorder();
 
   const [denoiserReady, setDenoiserReady] = useState(false);
+  const [denoiserFailed, setDenoiserFailed] = useState(false);
 
   // We use refs for files to ensure the callback has immediate access to them
   // without waiting for a re-render or being trapped in a stale closure.
@@ -85,7 +88,8 @@ export default function RecordingScreen() {
   );
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
-  const [isCatchingUp, setIsCatchingUp] = useState(false);
+  const [liveIssue, setLiveIssue] = useState<RecordingQueueIssue | null>(null);
+  const [liveSession, setLiveSession] = useState<{ monitor: LiveModelMonitor | null; queue: BoundedRecordingQueue } | null>(null);
   // A failed Stop may leave the native writer open even after the hook reports idle.
   const [recorderUncertain, setRecorderUncertain] = useState(false);
   const [recoveryReady, setRecoveryReady] = useState(false);
@@ -111,6 +115,8 @@ export default function RecordingScreen() {
   const denoiserRef = useRef<DeepFilterNet | null>(null);
   const alignedRef = useRef<AlignedDenoiseStream | null>(null);
   const queueRef = useRef<BoundedRecordingQueue | null>(null);
+  const monitorRef = useRef<LiveModelMonitor | null>(null);
+  const modelInitInFlightRef = useRef(false);
   const nativeRecordingRef = useRef<fs.File | null>(null);
   const acceptingStreamRef = useRef(false);
   const runActiveRef = useRef(false);
@@ -135,22 +141,27 @@ export default function RecordingScreen() {
     }
   }, [isPaused, durationMs]);
 
+  const initDenoiser = async () => {
+    if (modelInitInFlightRef.current) return;
+    modelInitInFlightRef.current = true;
+    try {
+      const denoiser = await getDenoiser();
+      if (!mountedRef.current) return;
+      denoiserRef.current = denoiser;
+      setDenoiserReady(true);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      console.error("Failed to init denoiser:", err);
+      setDenoiserFailed(true);
+      setError(err instanceof Error ? err : new Error(String(err)));
+      setIsErrorModalVisible(true);
+    } finally { modelInitInFlightRef.current = false; }
+  };
+
   useEffect(() => {
     mountedRef.current = true;
-    const initDenoiser = async () => {
-      try {
-        const denoiser = await getDenoiser();
-        if (!mountedRef.current) return;
-        denoiserRef.current = denoiser;
-        setDenoiserReady(true);
-      } catch (err) {
-        if (!mountedRef.current) return;
-        console.error("Failed to init denoiser:", err);
-        setError(err instanceof Error ? err : new Error(String(err)));
-        setIsErrorModalVisible(true);
-      }
-    };
-    initDenoiser();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- model readiness changes only after asynchronous loading
+    void initDenoiser();
 
     return () => {
       // Ordinary Back/swipe navigation is prevented while recording. If the
@@ -158,6 +169,7 @@ export default function RecordingScreen() {
       // recordings folder and can be recovered from History on next launch.
       mountedRef.current = false;
       acceptingStreamRef.current = false;
+      monitorRef.current?.dispose();
       // A Stop/recovery operation already owns the writer and model lifetime.
       if (isStoppingRef.current) return;
       // If native Start is still pending, wait for it before asking Stop; a
@@ -215,11 +227,10 @@ export default function RecordingScreen() {
     const queue = queueRef.current;
     if (!queue || queue.overloaded || queue.error) return;
     if (!(event.data instanceof Float32Array)) {
-      queue.error = new Error("Recorder returned an unexpected stream format");
-      setIsCatchingUp(true);
+      queue.fail(new Error("Recorder returned an unexpected stream format"));
       return;
     }
-    if (event.data.length && !queue.enqueue(event.data)) setIsCatchingUp(true);
+    if (event.data.length) queue.enqueue(event.data);
   };
 
   const startRecording = async () => {
@@ -262,7 +273,7 @@ export default function RecordingScreen() {
 
       setFinalOriginalWav(null);
       setFinalDenoisedWav(null);
-      setIsCatchingUp(false);
+      setLiveIssue(null);
       isStoppingRef.current = false;
       nativeRecordingRef.current = null;
       if (queueRef.current) await queueRef.current.drain();
@@ -279,15 +290,33 @@ export default function RecordingScreen() {
       }
       denoiserRef.current = denoiser;
       const state = denoiser.createStream(attenLimDb);
+      // Visualization is optional: it must never stop recording or change model samples.
+      monitorRef.current?.dispose();
+      let monitor: LiveModelMonitor | null = null;
+      try { monitor = new LiveModelMonitor(); }
+      catch (monitorError) { console.warn("Live visualization could not start:", monitorError); }
+      monitorRef.current = monitor;
       const aligned = new AlignedDenoiseStream(HOP_SIZE, metadata.algorithmic_delay_samples,
-        (frame, output) => denoiser.processFrame(state, frame, output));
+        async (frame, output) => {
+          const result = await denoiser.processFrame(state, frame, output);
+          try { monitor?.noteModelFrame(); } catch { /* display is never part of model success */ }
+          return result;
+        });
       alignedRef.current = aligned;
-      queueRef.current = new BoundedRecordingQueue(MAX_QUEUED_CHUNKS, MAX_QUEUED_SAMPLES, async samples => {
+      let queue: BoundedRecordingQueue;
+      queue = new BoundedRecordingQueue(MAX_QUEUED_CHUNKS, MAX_QUEUED_SAMPLES, async samples => {
         // Retain a byte-exact prefix for comparison with the native WAV.
         await writePCMChunk(origPcm, samples, true);
         const cleaned = await aligned.push(samples);
         if (cleaned.length) await writePCMChunk(denPcm, cleaned, true);
+        // Drop visualization work first if the live queue is getting behind.
+        try { monitor?.observe(samples, cleaned, queue.snapshot().pendingSamples < SAMPLE_RATE / 2); }
+        catch (monitorError) { console.warn("Live visualization skipped a chunk:", monitorError); }
+      }, issue => {
+        if (mountedRef.current && queueRef.current === queue) setLiveIssue(issue);
       });
+      queueRef.current = queue;
+      setLiveSession({ monitor, queue });
       acceptingStreamRef.current = true;
       const dir = recordingsDir();
       // @siteed's Android API expects a filesystem path, not a file: URI.
@@ -551,8 +580,8 @@ export default function RecordingScreen() {
         showsVerticalScrollIndicator={false}
       >
         {!finalOriginalWav && !isFinalizing && !recorderUncertain && !recoveryReady && (
-          <View style={styles.timerContainer}>
-            <Text style={styles.timerText}>
+          <View style={[styles.timerContainer, (isRecording || isPaused) && styles.timerContainerActive]}>
+            <Text style={[styles.timerText, (isRecording || isPaused) && styles.timerTextActive]}>
               {formatTime(isPaused ? pausedDuration : (durationMs ?? 0))}
             </Text>
             {isRecording && !isPaused && (
@@ -594,15 +623,25 @@ export default function RecordingScreen() {
           </View>
         ) : !finalOriginalWav ? (
           <View style={styles.controlsContainer}>
-            <Text accessibilityLiveRegion="polite" style={styles.statusText}>
-              {!settingsReady ? "Loading saved settings…" : !denoiserReady ? "Preparing denoiser…" : !isRecording && !isPaused
+            <Text accessibilityLiveRegion="polite" style={[styles.statusText, (isRecording || isPaused) && styles.activeStatusText]}>
+              {!settingsReady ? "Loading saved settings…" : denoiserFailed ? "Denoiser unavailable" : !denoiserReady ? "Preparing denoiser…" : !isRecording && !isPaused
                 ? "Ready to record"
-                : isPaused
-                  ? "Recording paused"
-                  : isCatchingUp ? "Recording safely — denoising will finish after stop" : "Denoising in Real-time"}
+                : isPaused ? "Recording paused"
+                  : liveIssue ? "Recording · live cleaning interrupted" : "Recording"}
             </Text>
 
+            {denoiserFailed && !isRecording && !isPaused && (
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Retry preparing denoiser"
+                style={styles.retryModelButton} onPress={() => { setDenoiserFailed(false); setDenoiserReady(false); void initDenoiser(); }}>
+                <Text style={styles.retryModelText}>Retry denoiser</Text>
+              </TouchableOpacity>
+            )}
             {isStarting && <Host matchContents colorScheme="dark"><LoadingIndicator color={theme.COLORS.primary} /></Host>}
+
+            {(isRecording || isPaused) && (
+              <LiveModelView monitor={liveSession?.monitor ?? null} queue={liveSession?.queue ?? null} issue={liveIssue} paused={isPaused}
+                strength={attenPreset === "custom" ? `${attenLimDb} dB mix` : attenPreset.charAt(0).toUpperCase() + attenPreset.slice(1)} />
+            )}
 
             {!isRecording && !isPaused ? (
               <View style={[styles.sliderContainer, (!settingsReady || isStarting) && { opacity: 0.6 }]}
@@ -681,58 +720,9 @@ export default function RecordingScreen() {
                 <View style={styles.recordButtonInner}>
                   <Feather name="mic" size={40} color={theme.COLORS.white} />
                 </View>
-                <Text style={styles.buttonLabel}>{!settingsReady || !denoiserReady ? "Preparing…" : isStarting ? "Starting…" : "Tap to Start"}</Text>
+                <Text style={styles.buttonLabel}>{denoiserFailed ? "Model unavailable" : !settingsReady || !denoiserReady ? "Preparing…" : isStarting ? "Starting…" : "Tap to Start"}</Text>
               </Pressable>
-            ) : (
-              <View style={styles.activeControls}>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.controlCircle,
-                    {
-                      backgroundColor: "rgba(255, 255, 255, 0.1)",
-                      opacity: pressed ? 0.7 : 1,
-                    },
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel={isPaused ? "Resume recording" : "Pause recording"}
-                  onPress={isPaused ? resumeRecording : pauseRecording}
-                  android_ripple={{
-                    color: "rgba(255, 255, 255, 0.2)",
-                    borderless: true,
-                    radius: 32,
-                  }}
-                >
-                  <Feather
-                    name={isPaused ? "play" : "pause"}
-                    size={28}
-                    color={theme.COLORS.text}
-                  />
-                </Pressable>
-
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.stopButton,
-                    { opacity: pressed ? 0.8 : 1 },
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Stop and save recording"
-                  onPress={stopRecording}
-                  android_ripple={{
-                    color: "rgba(255, 255, 255, 0.2)",
-                    borderless: true,
-                    radius: 50,
-                  }}
-                >
-                  <View style={styles.stopButtonInner}>
-                    <Feather
-                      name="square"
-                      size={32}
-                      color={theme.COLORS.white}
-                    />
-                  </View>
-                </Pressable>
-              </View>
-            )}
+            ) : null}
           </View>
         ) : (
           <View style={styles.resultsContainer}>
@@ -846,6 +836,37 @@ export default function RecordingScreen() {
         )}
       </ScrollView>
 
+      {(isRecording || isPaused) && !isFinalizing && !recorderUncertain && !recoveryReady && !finalOriginalWav && (
+        <View style={styles.fixedControls}>
+          <View style={styles.controlGroup}>
+            <Pressable
+              style={({ pressed }) => [styles.controlCircle, { backgroundColor: "rgba(255, 255, 255, 0.1)", opacity: pressed ? 0.7 : 1 }]}
+              accessibilityRole="button"
+              accessibilityLabel={isPaused ? "Resume recording" : "Pause recording"}
+              onPress={isPaused ? resumeRecording : pauseRecording}
+              android_ripple={{ color: "rgba(255, 255, 255, 0.2)", borderless: true, radius: 32 }}
+            >
+              <Feather name={isPaused ? "play" : "pause"} size={28} color={theme.COLORS.text} />
+            </Pressable>
+            <Text style={styles.controlLabel}>{isPaused ? "Resume" : "Pause"}</Text>
+          </View>
+          <View style={styles.controlGroup}>
+            <Pressable
+              style={({ pressed }) => [styles.stopButton, { opacity: pressed ? 0.8 : 1 }]}
+              accessibilityRole="button"
+              accessibilityLabel="Stop and save recording"
+              onPress={stopRecording}
+              android_ripple={{ color: "rgba(255, 255, 255, 0.2)", borderless: true, radius: 40 }}
+            >
+              <View style={styles.stopButtonInner}>
+                <Feather name="square" size={28} color={theme.COLORS.white} />
+              </View>
+            </Pressable>
+            <Text style={styles.controlLabel}>Stop</Text>
+          </View>
+        </View>
+      )}
+
       <ErrorModal
         context="record"
         visible={isErrorModalVisible}
@@ -925,6 +946,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     height: 100,
   },
+  timerContainerActive: { marginTop: 8, marginBottom: 4, height: 62 },
   timerText: {
     fontSize: 72,
     fontWeight: "200",
@@ -932,6 +954,7 @@ const styles = StyleSheet.create({
     fontVariant: ["tabular-nums"],
     letterSpacing: -2,
   },
+  timerTextActive: { fontSize: 46, letterSpacing: -1 },
   recordingIndicator: {
     marginLeft: 20,
     alignItems: "center",
@@ -961,6 +984,9 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 2,
   },
+  activeStatusText: { marginBottom: 10, textTransform: "none", letterSpacing: 0, textAlign: "center" },
+  retryModelButton: { minHeight: 48, paddingHorizontal: 20, justifyContent: "center", borderWidth: 1, borderColor: theme.COLORS.primary, borderRadius: 12, marginBottom: 16 },
+  retryModelText: { color: theme.COLORS.primary, fontSize: 14, fontWeight: "700" },
   controlsContainer: {
     alignItems: "center",
     justifyContent: "center",
@@ -1009,11 +1035,13 @@ const styles = StyleSheet.create({
     fontSize: theme.FONT_SIZE.body,
     fontWeight: "700",
   },
-  activeControls: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 40,
+  fixedControls: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 48,
+    paddingTop: 8, paddingBottom: 8, borderTopWidth: 1, borderTopColor: theme.COLORS.border,
+    backgroundColor: theme.COLORS.background,
   },
+  controlGroup: { alignItems: "center", gap: 4 },
+  controlLabel: { color: theme.COLORS.subtext, fontSize: 12, fontWeight: "700" },
   controlCircle: {
     width: 64,
     height: 64,
@@ -1024,9 +1052,9 @@ const styles = StyleSheet.create({
     borderColor: theme.COLORS.border,
   },
   stopButton: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: "rgba(255, 255, 255, 0.05)",
     alignItems: "center",
     justifyContent: "center",
@@ -1034,9 +1062,9 @@ const styles = StyleSheet.create({
     borderColor: theme.COLORS.error,
   },
   stopButtonInner: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: theme.COLORS.error,
     alignItems: "center",
     justifyContent: "center",
