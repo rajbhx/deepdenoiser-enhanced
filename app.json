@@ -67,7 +67,7 @@
       [
         "expo-media-library",
         {
-          "isAccessMediaLocationEnabled": true,
+          "isAccessMediaLocationEnabled": false,
           "granularPermissions": [
             "audio",
             "video"

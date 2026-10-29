@@ -1,5 +1,5 @@
 import * as theme from "@/src/constants/theme";
-import { switchPlayback } from "@/src/scripts/comparePlayback";
+import { switchPlayback, togglePlayback } from "@/src/scripts/comparePlayback";
 import Feather from "@expo/vector-icons/Feather";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { useFocusEffect } from "expo-router/react-navigation";
@@ -66,7 +66,7 @@ export default function CompareAudioPlayer({ originalUri, cleanedUri }: Props) {
       </View>
       <View style={styles.playerRow}>
         <Pressable accessibilityRole="button" accessibilityLabel={status.playing ? "Pause audio" : "Play audio"}
-          disabled={!ready || switching} onPress={() => status.playing ? player.pause() : player.play()} style={styles.play}>
+          disabled={!ready || switching} onPress={() => { void togglePlayback(player).catch(() => setError("Could not play audio.")); }} style={styles.play}>
           <Feather name={status.playing ? "pause" : "play"} size={22} color={theme.COLORS.background} />
         </Pressable>
         <View style={styles.timeline}>

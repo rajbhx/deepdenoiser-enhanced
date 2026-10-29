@@ -9,7 +9,7 @@ function load(name) {
   const mod = new Module(filename, module); mod.filename = filename; mod._compile(js, filename); return mod.exports;
 }
 const { runSequentialQueue, ProcessingCancelled } = load('batchQueue');
-const { switchPlayback } = load('comparePlayback');
+const { switchPlayback, togglePlayback } = load('comparePlayback');
 (async () => {
   let concurrent = 0, maxConcurrent = 0;
   const events = [];
@@ -53,4 +53,9 @@ const { switchPlayback } = load('comparePlayback');
   await assert.rejects(() => switchPlayback(source, target), /seek failure/);
   assert.deepEqual(calls, ['pause','resume-source']);
   console.log('PASS A/B switching preserves play/pause and time, clamps, and recovers on seek failure');
+  calls.length = 0; target.currentTime = 100; target.duration = 100; target.playing = false;
+  target.seekTo = async (value) => calls.push(`seek:${value}`);
+  await togglePlayback(target);
+  assert.deepEqual(calls, ['seek:0','play-target']);
+  console.log('PASS A/B playback restarts at the beginning after reaching the end');
 })().catch(e => { console.error(e); process.exitCode = 1; });

@@ -397,6 +397,9 @@ export default function RecordingScreen() {
       const denPcm = denoisedPcmFileRef.current;
 
       if (origPcm && denPcm) {
+        if (!origPcm.exists || !denPcm.exists || origPcm.size === 0) {
+          throw new Error("No audio was recorded. Please try again.");
+        }
         // Handle any remaining samples in the buffer
         if (audioBufferRef.current.length > 0 && denoiserRef.current) {
           const leftovers = audioBufferRef.current;
@@ -414,11 +417,6 @@ export default function RecordingScreen() {
           tail = tail.subarray(skip);
           if (tail.length) await writePCMChunk(denPcm, tail, true);
           audioBufferRef.current = new Float32Array(0);
-        }
-
-        // Ensure files exist before wrapping
-        if (!origPcm.exists || !denPcm.exists) {
-          throw new Error("PCM files missing after recording.");
         }
 
         // Save the original first so it survives even if denoising/finalization fails.

@@ -51,7 +51,7 @@ export default function ShareHandler() {
                   batch: encodeURIComponent(JSON.stringify([{
                     uri: imported.uri,
                     name: payload.originalName || "shared_file",
-                    kind: mediaKind(payload.originalName || "shared_file", payload.contentMimeType ?? payload.mimeType),
+                    kind: mediaKind(payload.originalName || "shared_file", payload.contentMimeType ?? payload.mimeType ?? (payload.contentType === "video" ? "video/*" : undefined)),
                   }])),
                 },
               });

@@ -23,3 +23,10 @@ export async function switchPlayback(current: ComparablePlayer, next: Comparable
     throw error;
   }
 }
+
+/** Replay from the beginning after the active track has reached its end. */
+export async function togglePlayback(player: ComparablePlayer): Promise<void> {
+  if (player.playing) { player.pause(); return; }
+  if (player.duration > 0 && player.currentTime >= player.duration - 0.01) await player.seekTo(0);
+  player.play();
+}
