@@ -3,6 +3,7 @@ import * as fs from "expo-file-system";
 import React, { useEffect, useRef, useState } from "react";
 import { Alert, type StyleProp, StyleSheet, Text, TouchableOpacity, type ViewStyle } from "react-native";
 import { savedMediaLocation, saveToDevice } from "@/src/scripts/formatHandler";
+import { recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
 import * as theme from "@/src/constants/theme";
 
 interface SaveButtonProps {
@@ -30,15 +31,18 @@ export default function SaveButton({ file, label = "Save to device", savedLabel 
   const handleSave = async () => {
     if (!file || saving.current) return;
     saving.current = true; setBusy(true);
+    recordDiagnostic("export", "export", "START");
     try {
       beforeSave?.();
       await saveToDevice(file, albumName);
+      recordDiagnostic("export", "export", "OK");
       if (!mounted.current) return;
       setSaved(true);
       Alert.alert("Saved to device", `Find your file in ${savedMediaLocation(file, albumName)}. It may take a moment to appear in media apps.`);
       if (timer.current) clearTimeout(timer.current);
       timer.current = setTimeout(() => setSaved(false), 2000);
     } catch (error) {
+      recordDiagnosticError("export", "export", error);
       if (mounted.current) {
         const reason = error instanceof Error ? error : new Error(String(error));
         if (onError) onError(reason); else Alert.alert("Could not save", reason.message);

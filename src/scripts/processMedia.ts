@@ -10,6 +10,8 @@ import {
 import { decodeToPCMFile, mergeAudioVideo, PCMtoWav, readPCMChunks, sanitizeFileName, writePCMChunk } from "./formatHandler";
 import type { SilenceTrimSettings } from "./silenceTrim";
 import { throwIfCancelled, type CancellationToken } from "./batchQueue";
+import { recordDiagnostic, recordDiagnosticError } from "./diagnostics";
+import type { DiagnosticStage } from "./diagnosticsCore";
 
 export type ProcessingSettings = {
   attenLimDb: number;
@@ -38,12 +40,29 @@ export async function processMedia(
   const effectiveTrim: SilenceTrimSettings = video ? { ...settings.silenceTrim, enabled: false } : settings.silenceTrim;
   const kind = video ? "video" : "audio";
   const cacheKey = buildCacheKey(input, { ...settings, silenceTrim: effectiveTrim }, kind);
-  const progress = (stage: string, percent = 0, eta: string | null = null) => onProgress({ stage, percent, eta });
+  const stageNames: Record<string, DiagnosticStage> = {
+    "Checking cache...": "cache", "Reusing decoded audio...": "decode", "Extracting audio...": "decode",
+    "Analyzing loudness...": "analyze", "Reusing denoised audio...": "cache", "Preparing AI model...": "model",
+    "Removing noise...": "denoise", "Finalizing media...": "finalize", "Merging audio and video...": "mux",
+  };
+  let diagnosticStage: DiagnosticStage = "prepare";
+  let stageStart = Date.now();
+  let completed = false;
+  const progress = (stage: string, percent = 0, eta: string | null = null) => {
+    const next = stageNames[stage] ?? "general";
+    if (next !== diagnosticStage) {
+      recordDiagnostic("process", diagnosticStage, "OK", "info", Date.now() - stageStart);
+      diagnosticStage = next; stageStart = Date.now();
+      recordDiagnostic("process", diagnosticStage, "START");
+    }
+    onProgress({ stage, percent, eta });
+  };
   const start = Date.now();
   throwIfCancelled(token);
   // Reserve the run before asynchronous cache verification: it may take a
   // long time on large outputs, and incoming shares must wait throughout.
   beginRun();
+  recordDiagnostic("process", diagnosticStage, "START");
   // Only files created by this run are cleaned up. Previously indexed PCM and
   // completed outputs belong to the cache/user and must never be swept here.
   const owned = new Set<string>();
@@ -54,7 +73,7 @@ export async function processMedia(
     try {
       const cached = await lookupCachedOutput(cacheKey, kind);
       throwIfCancelled(token);
-      if (cached) return { file: cached, seconds: 0, cached: true, trimEnabled: effectiveTrim.enabled };
+      if (cached) { completed = true; return { file: cached, seconds: 0, cached: true, trimEnabled: effectiveTrim.enabled }; }
     } catch (error) {
       throwIfCancelled(token);
       console.warn("Output cache unavailable; processing fresh:", error);
@@ -191,8 +210,13 @@ export async function processMedia(
     // persistent result even if Stop was pressed during the final file move.
     try { await storeCachedOutput(cacheKey, result); }
     catch (error) { console.warn("Could not index finished output:", error); }
+    completed = true;
     return { file: result, seconds: (Date.now() - start) / 1000, cached: false, trimEnabled: effectiveTrim.enabled };
+  } catch (error) {
+    recordDiagnosticError("process", diagnosticStage, error);
+    throw error;
   } finally {
+    if (completed) recordDiagnostic("process", diagnosticStage, "OK", "info", Date.now() - stageStart);
     for (const uri of owned) {
       try { const file = new fs.File(uri); if (file.exists) file.delete(); }
       catch (error) { console.warn("Could not remove partial processing file:", error); }

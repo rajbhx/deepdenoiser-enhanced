@@ -5,6 +5,8 @@ import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { getDenoiser } from "@/src/scripts/denoiserSingleton";
+import { initializeDiagnostics, installDiagnosticGlobalHandler, recordDiagnosticError } from "@/src/scripts/diagnostics";
+import DiagnosticBoundary from "@/src/components/DiagnosticBoundary";
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -12,15 +14,19 @@ export default function RootLayout() {
   const [fontsLoaded, fontError] = useFonts({ ...Feather.font });
   const ready = fontsLoaded || !!fontError;
   useEffect(() => {
+    installDiagnosticGlobalHandler();
+    void initializeDiagnostics();
+  }, []);
+  useEffect(() => {
     if (!ready) return;
     void SplashScreen.hideAsync();
-    void getDenoiser().catch((error) => console.warn("[DeepFilterNet] preload failed:", error));
+    void getDenoiser().catch((error) => { recordDiagnosticError("model", "model", error); console.warn("[DeepFilterNet] preload failed:", error); });
   }, [ready]);
   if (!ready) return null;
   // Import uses Android's document picker. Microphone permission is requested
   // only when recording starts, and media permission only when saving. A user
   // who denies either can still use the rest of the app.
-  return <SafeAreaProvider><Stack screenOptions={{ headerShown: false }} initialRouteName="(tabs)">
-    <Stack.Screen name="(tabs)" /><Stack.Screen name="processing" /><Stack.Screen name="recording" /><Stack.Screen name="history" />
-  </Stack></SafeAreaProvider>;
+  return <SafeAreaProvider><DiagnosticBoundary><Stack screenOptions={{ headerShown: false }} initialRouteName="(tabs)">
+    <Stack.Screen name="(tabs)" /><Stack.Screen name="processing" /><Stack.Screen name="recording" /><Stack.Screen name="history" /><Stack.Screen name="diagnostics" />
+  </Stack></DiagnosticBoundary></SafeAreaProvider>;
 }

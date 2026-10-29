@@ -76,6 +76,7 @@ const mocks={
   '@/src/scripts/recordingSafety':nativeSafety,'@/src/scripts/denoiseCache':cacheMock,
   '@/src/scripts/alignedDenoiseStream':{AlignedDenoiseStream:class{async push(v){return v}async finish(){return new Float32Array()}}},
   '@/src/scripts/analytics':{trackAppEvent(){},trackAppError(){}},
+  '@/src/scripts/diagnostics':{recordDiagnostic(){},recordDiagnosticError(){}},
   '@/src/scripts/silenceTrim':{DEFAULT_SILENCE_TRIM:{enabled:false,mode:'auto',thresholdDb:-40,minSilenceMs:500}},
   '@/src/scripts/formatHandler':{PCMtoWav:async()=>({file:new FakeFile('file:///cache/partial.wav')}),writePCMChunk:async()=>{},saveToDevice:()=>S.save(),savedMediaLocation:()=> 'Music/DeepDenoiser Audio'},
   '@/src/scripts/processMedia':{processMedia:(...args)=>S.processMedia(...args)},

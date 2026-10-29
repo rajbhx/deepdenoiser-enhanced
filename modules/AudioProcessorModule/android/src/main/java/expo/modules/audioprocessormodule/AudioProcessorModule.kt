@@ -32,6 +32,51 @@ class AudioProcessorModule : Module() {
             moduleScope.cancel()
         }
 
+        // The diagnostics store is opt-in and accepts only a bounded allowlist
+        // of structured events. It never receives or stores media or paths.
+        AsyncFunction("getDiagnosticsInfo") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = appContext.reactContext ?: throw Exception("React Context is null")
+                    promise.resolve(DiagnosticsNative.getInfo(context))
+                } catch (e: Exception) {
+                    promise.reject("ERR_DIAGNOSTICS_INFO", "Could not read device information", e)
+                }
+            }
+        }
+        AsyncFunction("readDiagnosticHistory") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = appContext.reactContext ?: throw Exception("React Context is null")
+                    promise.resolve(DiagnosticsNative.readHistory(context))
+                } catch (e: Exception) {
+                    promise.reject("ERR_DIAGNOSTICS_READ", "Could not read diagnostic history", e)
+                }
+            }
+        }
+        AsyncFunction("writeDiagnosticHistory") { json: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = appContext.reactContext ?: throw Exception("React Context is null")
+                    DiagnosticsNative.writeHistory(context, json)
+                    promise.resolve(true)
+                } catch (e: Exception) {
+                    promise.reject("ERR_DIAGNOSTICS_WRITE", "Could not save diagnostic history", e)
+                }
+            }
+        }
+        AsyncFunction("deleteDiagnosticHistory") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = appContext.reactContext ?: throw Exception("React Context is null")
+                    DiagnosticsNative.deleteHistory(context)
+                    promise.resolve(true)
+                } catch (e: Exception) {
+                    promise.reject("ERR_DIAGNOSTICS_DELETE", "Could not delete diagnostic history", e)
+                }
+            }
+        }
+
         AsyncFunction("extractAndTranscodeAudio") {
                 input: String,
                 output: String,

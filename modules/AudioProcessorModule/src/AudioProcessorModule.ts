@@ -2,12 +2,17 @@ import { NativeModule, requireNativeModule } from "expo";
 
 import {
   AudioProcessorModuleEvents,
+  DiagnosticsInfo,
   PcmToWavResult,
   SilenceTrimNativeConfig,
   VideoTrimConfig,
 } from "./AudioProcessorModule.types";
 
 declare class AudioProcessorModule extends NativeModule<AudioProcessorModuleEvents> {
+  getDiagnosticsInfo(): Promise<DiagnosticsInfo>;
+  readDiagnosticHistory(): Promise<string | null>;
+  writeDiagnosticHistory(json: string): Promise<boolean>;
+  deleteDiagnosticHistory(): Promise<boolean>;
   extractAndTranscodeAudio(
     inputUri: string,
     outputUri: string,

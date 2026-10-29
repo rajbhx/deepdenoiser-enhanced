@@ -1,5 +1,34 @@
 import type { StyleProp, ViewStyle } from 'react-native';
 
+/** Read-only Android status; numbers are approximate and grants do not cover SAF access. */
+export type DiagnosticsInfo = {
+  packageName: string;
+  versionName: string;
+  versionCode: number;
+  debuggable: boolean;
+  certificateSha256: string | null;
+  androidDebugSubject: boolean | null;
+  manufacturer: string;
+  model: string;
+  androidVersion: string;
+  sdk: number;
+  abi: string;
+  cpuCount: number;
+  batteryPercent: number | null;
+  thermalStatus: number | null;
+  totalMemoryBytes: number;
+  availableMemoryBytes: number;
+  lowMemory: boolean;
+  processPssBytes: number;
+  freeStorageBytes: number;
+  totalStorageBytes: number;
+  microphoneGranted: boolean;
+  notificationsEnabled: boolean;
+  mediaAudioGranted: boolean;
+  mediaVideoGranted: boolean;
+  previousExit: { reason: string; time: number } | null;
+};
+
 export type OnLoadEventPayload = {
   url: string;
 };

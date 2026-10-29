@@ -5,6 +5,12 @@ import AudioProcessorModule from "./src/AudioProcessorModule";
 import type { PcmToWavResult, SilenceTrimNativeConfig, VideoTrimConfig } from "./src/AudioProcessorModule.types";
 export * from "./src/AudioProcessorModule.types";
 
+/** Read Android state without requesting permissions or opening any user media. */
+export const getDiagnosticsInfo = () => AudioProcessorModule.getDiagnosticsInfo();
+export const readDiagnosticHistory = () => AudioProcessorModule.readDiagnosticHistory();
+export const writeDiagnosticHistory = (json: string) => AudioProcessorModule.writeDiagnosticHistory(json);
+export const deleteDiagnosticHistory = () => AudioProcessorModule.deleteDiagnosticHistory();
+
 export async function extractAndTranscodeAudio(
   inputUri: string,
   outputUri: string,

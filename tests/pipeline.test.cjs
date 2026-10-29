@@ -75,6 +75,7 @@ const pipeline=load('processMedia',{
   './alignedDenoiseStream':load('alignedDenoiseStream'),
   'expo-file-system':filesystem,
   './batchQueue':queue,
+  './diagnostics':{recordDiagnostic(){},recordDiagnosticError(){}},
   './denoiseCache':cacheApi,
   './formatHandler':format,
   './denoiserSingleton':{beginRun(){began++},endRun(){ended++},getDenoiser:async()=>model},

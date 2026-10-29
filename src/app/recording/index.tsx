@@ -14,6 +14,7 @@ import { AlignedDenoiseStream } from "@/src/scripts/alignedDenoiseStream";
 import { assertNativeRecorderIdle, BoundedRecordingQueue, ensureRecordingWavHeader, reconcileRecording, recordingsDir } from "@/src/scripts/recordingSafety";
 import { processMedia } from "@/src/scripts/processMedia";
 import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
+import { recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
 import { PCMtoWav, writePCMChunk } from "@/src/scripts/formatHandler";
 import {
   ATTEN_PRESET_DB,
@@ -225,15 +226,18 @@ export default function RecordingScreen() {
     if (isStartingRef.current || isRecordingRef.current || recorderUncertain || recoveryReady || !settingsReady) return;
     isStartingRef.current = true;
     setIsStarting(true);
+    recordDiagnostic("record", "record-start", "START");
     let nativeStartAttempted = false;
     try {
       if (!denoiserReady) {
+        recordDiagnostic("record", "record-start", "CANCELLED");
         Alert.alert("Wait", "Denoiser is still initializing...");
         return;
       }
       const permission = await requestRecordingPermissionsAsync();
       if (!mountedRef.current) return;
       if (!permission.granted) {
+        recordDiagnostic("record", "record-start", "FAIL_PERMISSION", "warning");
         Alert.alert("Microphone permission needed", "Allow microphone access to record your voice. You can still import files without it.");
         return;
       }
@@ -310,7 +314,9 @@ export default function RecordingScreen() {
       nativeStartedRef.current = true;
       nativeRecordingRef.current = new fs.File(started.fileUri);
       isRecordingRef.current = true;
+      recordDiagnostic("record", "record-start", "OK");
     } catch (error) {
+      recordDiagnosticError("record", "record-start", error);
       acceptingStreamRef.current = false;
       if (!mountedRef.current) return; // unmount cleanup owns native liveness
       if (nativeStartedRef.current) {
@@ -346,6 +352,7 @@ export default function RecordingScreen() {
   const stopRecording = async () => {
     if (isStoppingRef.current) return;
     isStoppingRef.current = true;
+    recordDiagnostic("record", "record-stop", "START");
     let savedOriginal: fs.File | null = null;
     let nativeStopped = false;
     try {
@@ -407,7 +414,9 @@ export default function RecordingScreen() {
         savedDenoised = result.file;
       }
       setFinalDenoisedWav(savedDenoised);
+      recordDiagnostic("record", "record-stop", "OK");
     } catch (error) {
+      recordDiagnosticError("record", "record-stop", error);
       acceptingStreamRef.current = false;
       await queueRef.current?.drain();
       if (!nativeStopped) {
@@ -838,6 +847,7 @@ export default function RecordingScreen() {
       </ScrollView>
 
       <ErrorModal
+        context="record"
         visible={isErrorModalVisible}
         error={error}
         onClose={() => setIsErrorModalVisible(false)}

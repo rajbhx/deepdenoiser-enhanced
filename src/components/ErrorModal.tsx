@@ -2,8 +2,11 @@ import * as theme from "@/src/constants/theme";
 import { Feather } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { recordDiagnosticError } from "@/src/scripts/diagnostics";
+import type { DiagnosticDomain } from "@/src/scripts/diagnosticsCore";
 import {
+  Alert,
   Modal,
   ScrollView,
   StyleSheet,
@@ -16,10 +19,14 @@ interface ErrorModalProps {
   visible: boolean;
   error: Error | null;
   onClose: () => void;
+  context?: DiagnosticDomain;
 }
 
-export default function ErrorModal({ visible, error, onClose }: ErrorModalProps) {
+export default function ErrorModal({ visible, error, onClose, context = "ui" }: ErrorModalProps) {
   const [showDetails, setShowDetails] = useState(false);
+  useEffect(() => {
+    if (visible && error) recordDiagnosticError(context, "general", error);
+  }, [visible, error, context]);
 
   if (!error) return null;
 
@@ -81,9 +88,11 @@ export default function ErrorModal({ visible, error, onClose }: ErrorModalProps)
 
   const interpretation = interpretError(error);
 
-  const copyToClipboard = async () => {
-    const textToCopy = `Error: ${error.message}\n\nStack: ${error.stack}`;
-    await Clipboard.setStringAsync(textToCopy);
+  const copyToClipboard = () => {
+    Alert.alert("Copy technical details?", "These details may include file names, paths or other private information. Review them before sharing.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Copy", onPress: () => { void Clipboard.setStringAsync(`Error: ${error.message}\n\nStack: ${error.stack ?? "Unavailable"}`); } },
+    ]);
   };
 
   const submitToGithub = () => {
@@ -94,7 +103,10 @@ export default function ErrorModal({ visible, error, onClose }: ErrorModalProps)
       `**Device Info:**\n(Please add your device model,RAM size and OS version here)`
     );
     const url = `https://github.com/rajbhx/deepdenoiser-enhanced/issues/new?title=${title}&body=${body}`;
-    Linking.openURL(url);
+    Alert.alert("Open a public GitHub report?", "Issues are public. Review and remove private names, paths and personal information before posting.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Open GitHub", onPress: () => { void Linking.openURL(url); } },
+    ]);
   };
 
   return (

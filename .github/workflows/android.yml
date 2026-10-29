@@ -211,7 +211,7 @@ jobs:
           TMP=$(mktemp -d)
           unzip -q "$BINARY" "$PATTERN" -d "$TMP"
           find "$TMP" -name '*.dex' -print0 | xargs -0 -r strings > "$TMP/dex-strings.txt"
-          for SYMBOL in cancelPendingPick copyFileWithSha256 atomicReplaceFile exportMediaFile getContentDisplayName fingerprintFile isWriterActive DD_FS_SHORT_READ STOP_TIMEOUT getShareIntentGeneration acknowledgeShareIntent takeShareQueueOverflow ShareIntentQueue; do
+          for SYMBOL in cancelPendingPick copyFileWithSha256 atomicReplaceFile exportMediaFile getContentDisplayName fingerprintFile isWriterActive DD_FS_SHORT_READ STOP_TIMEOUT getShareIntentGeneration acknowledgeShareIntent takeShareQueueOverflow ShareIntentQueue getDiagnosticsInfo readDiagnosticHistory writeDiagnosticHistory deleteDiagnosticHistory; do
             grep -Fq "$SYMBOL" "$TMP/dex-strings.txt" || { echo "::error::$SYMBOL missing from DEX"; exit 1; }
             echo "OK: $SYMBOL present in DEX"
           done
@@ -260,6 +260,35 @@ jobs:
           path: |
             android/app/build/outputs/apk/**/*.apk
             android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 14
+
+      # Maps contain bundled source and have the same access as this repository's
+      # Actions artifacts. Never use these artifacts as a private secret store.
+      - name: Prepare diagnostic symbols
+        if: steps.build.outputs.build_type != 'debug'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/dd-diagnostic-symbols"
+          mkdir -p "$OUT"
+          MAP=$(find android/app/build/generated/sourcemaps/react -name '*.map' -type f | head -1)
+          test -n "$MAP" && test -s "$MAP" || { echo "::error::Release JS source map missing"; exit 1; }
+          cp "$MAP" "$OUT/index.android.bundle.map"
+          R8=android/app/build/outputs/mapping/release/mapping.txt
+          test -s "$R8" || { echo "::error::Release R8 mapping missing"; exit 1; }
+          cp "$R8" "$OUT/r8-mapping.txt"
+          NATIVE=$(find android/app/build/outputs/native-debug-symbols -name '*.zip' -type f 2>/dev/null | head -1 || true)
+          if [ -n "$NATIVE" ]; then cp "$NATIVE" "$OUT/native-debug-symbols.zip"; else echo 'Native debug symbols were not generated; vendor symbols may be unavailable.' > "$OUT/NATIVE-SYMBOLS-UNAVAILABLE.txt"; fi
+          printf 'Commit: %s\nBuild type: %s\nSigning mode: %s\n' "$GITHUB_SHA" '${{ steps.build.outputs.build_type }}' '${{ steps.signing.outputs.mode }}' > "$OUT/BUILD.txt"
+          (cd "$OUT" && sha256sum ./* > SHA256SUMS.txt)
+
+      - name: Upload diagnostic symbols
+        if: steps.build.outputs.build_type != 'debug'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepdenoiser-diagnostic-symbols-${{ github.sha }}
+          path: ${{ runner.temp }}/dd-diagnostic-symbols/
           if-no-files-found: error
           retention-days: 14
 

@@ -110,6 +110,7 @@ function correlation(input, output, lag) {
       '@/assets/model/model_metadata.json': metadata, 'expo-file-system': filesystem,
       './denoiserSingleton': { beginRun() {}, endRun() {}, getDenoiser: async () => model },
       './denoiseCache': cache, './formatHandler': format, './batchQueue': queue,
+      './diagnostics': { recordDiagnostic() {}, recordDiagnosticError() {} },
       './alignedDenoiseStream': aligned,
     });
     const input = new File(work, 'input.pcm');

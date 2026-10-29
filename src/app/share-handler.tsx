@@ -3,6 +3,7 @@ import { claimSharedBatch, finishSharedBatch } from "@/src/scripts/shareClaim";
 import { importSharedMedia } from "@/src/scripts/sharedImport";
 import { isCurrentShare, useRawIncomingShare } from "@/src/scripts/useRawIncomingShare";
 import { useProcessingBusy } from "@/src/scripts/useProcessingBusy";
+import { recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
 import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
 import { useIsFocused, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
@@ -23,6 +24,7 @@ export default function ShareHandler() {
     if (shareError) {
       if (reportedShareError.current !== shareError) {
         reportedShareError.current = shareError;
+        recordDiagnosticError("share", "share", shareError);
         Alert.alert("Could not read shared media", `${shareError.message}\nPlease share the files again.`, [
           { text: "Dismiss", onPress: () => { discardUnreadable(); router.navigate("/(tabs)"); } },
         ]);
@@ -35,9 +37,11 @@ export default function ShareHandler() {
     if (!claim) return;
     void (async () => {
       try {
+        recordDiagnostic("share", "share", "START");
         const selection = await importSharedMedia(payloads,
           (current, total) => setLabel(`Importing shared file ${current} of ${total}…`));
         navigatingFromShare.current = true;
+        recordDiagnostic("share", "share", "OK");
         consume(payloads, generation);
         router.replace({ pathname: "/processing/process", params: {
           fileuri: encodeURIComponent(selection[0].uri),
@@ -45,6 +49,7 @@ export default function ShareHandler() {
           batch: encodeURIComponent(JSON.stringify(selection)),
         } });
       } catch (error) {
+        recordDiagnosticError("share", "share", error);
         navigatingFromShare.current = false;
         consume(payloads, generation);
         const message = error instanceof Error ? error.message : String(error);

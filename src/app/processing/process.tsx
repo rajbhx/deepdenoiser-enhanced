@@ -29,6 +29,7 @@ interface QueueItem extends SelectedMedia {
   cached?: boolean;
   trimEnabled?: boolean;
   error?: string;
+  errorDetail?: Error;
 }
 
 function decode(value: string | undefined): string {
@@ -107,7 +108,7 @@ export default function ProcessScreen() {
     const settings: ProcessingSettings = { attenLimDb, normalize: { ...normalize }, silenceTrim: { ...silenceTrim } };
     setIsProcessing(true); setStopping(false);
     setItems((current) => current.map((item, index) => selectedIndices.has(index)
-      ? { ...item, status: "waiting", outputUri: undefined, error: undefined } : item));
+      ? { ...item, status: "waiting", outputUri: undefined, error: undefined, errorDetail: undefined } : item));
     try {
       await runSequentialQueue(batch, token, async ({ item }, _index, currentToken) => {
         const file = new fs.File(item.uri);
@@ -127,11 +128,11 @@ export default function ProcessScreen() {
         }
         setItems((current) => current.map((item, i) => {
           if (i !== index) return item;
-          if (event.type === "started") return { ...item, status: "working", error: undefined };
+          if (event.type === "started") return { ...item, status: "working", error: undefined, errorDetail: undefined };
           if (event.type === "completed") return { ...item, status: "done", outputUri: event.result.file.uri,
             seconds: event.result.seconds, cached: event.result.cached, trimEnabled: event.result.trimEnabled };
           if (event.type === "cancelled") return { ...item, status: "cancelled" };
-          return { ...item, status: "failed", error: event.error.message };
+          return { ...item, status: "failed", error: event.error.message, errorDetail: event.error };
         }));
       });
     } catch (err) {
@@ -220,7 +221,12 @@ export default function ProcessScreen() {
           {stopping && <Text style={styles.helper}>An Android decode or export already in progress may need to finish first.</Text>}
         </View>}
 
-        {current.status === "failed" && <View style={styles.errorCard}><Feather name="alert-circle" size={19} color={theme.COLORS.error} /><Text style={styles.errorText}>{current.error || "Processing failed."}</Text></View>}
+        {current.status === "failed" && <View>
+          <View style={styles.errorCard}><Feather name="alert-circle" size={19} color={theme.COLORS.error} /><Text style={styles.errorText}>{current.error || "Processing failed."}</Text></View>
+          <TouchableOpacity accessibilityRole="button" onPress={() => { setError(current.errorDetail ?? new Error(current.error || "Processing failed.")); setShowError(true); }} style={styles.errorDetailsButton}>
+            <Text style={styles.errorDetailsText}>View and copy error details</Text>
+          </TouchableOpacity>
+        </View>}
         {current.status === "cancelled" && <Text style={styles.helper}>Stopped safely. You can retry this file.</Text>}
 
         {output && <View style={styles.result}>
@@ -243,7 +249,7 @@ export default function ProcessScreen() {
               style={[theme.Styles.button, { flex: 1 }, !settingsReady && styles.disabled]} onPress={() => void run()}><Feather name="zap" size={18} color={theme.COLORS.background} style={{ marginRight: 8 }} /><Text style={theme.Styles.buttonText}>{!settingsReady ? "Loading settings…" : pendingCount === 0 ? "Process again" : items.length === 1 ? "Start denoising" : `Process ${pendingCount} file${pendingCount === 1 ? "" : "s"}`}</Text></TouchableOpacity>
           </View>}
       </View>
-      <ErrorModal visible={showError} error={error} onClose={() => setShowError(false)} />
+      <ErrorModal context="process" visible={showError} error={error} onClose={() => setShowError(false)} />
     </SafeAreaView>
   );
 }
@@ -264,6 +270,7 @@ const styles = StyleSheet.create({
   progressCard: { marginTop: 14 }, progressTop: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 13 }, progressLabel: { color: theme.COLORS.text, fontWeight: "700", fontSize: 14, marginBottom: 4 }, progressNumber: { color: theme.COLORS.primary, fontWeight: "800", fontSize: 18 },
   progressTrack: { height: 7, borderRadius: 5, backgroundColor: theme.COLORS.border, overflow: "hidden" }, progressFill: { height: "100%", backgroundColor: theme.COLORS.primary },
   errorCard: { flexDirection: "row", gap: 10, padding: 15, backgroundColor: "rgba(239,68,68,0.1)", borderRadius: 16, marginTop: 14 }, errorText: { flex: 1, color: theme.COLORS.text, fontSize: 13 },
+  errorDetailsButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: 12 }, errorDetailsText: { color: theme.COLORS.primary, fontSize: 13, fontWeight: "700" },
   result: { backgroundColor: theme.COLORS.surface, borderRadius: 20, padding: 16, borderWidth: 1, borderColor: "#1C6B66", marginTop: 14 }, resultBadge: { flexDirection: "row", alignItems: "center", gap: 5 }, resultBadgeText: { color: theme.COLORS.success, fontSize: 11, fontWeight: "800", letterSpacing: 0.8 },
   resultActions: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 18 }, saveButton: { flex: 1, backgroundColor: theme.COLORS.primary, height: 48, borderRadius: 13 }, shareButton: { width: 48, height: 48, alignItems: "center", justifyContent: "center", borderRadius: 13, backgroundColor: theme.COLORS.background },
   footer: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: 16, paddingTop: 12, backgroundColor: theme.COLORS.background }, footerRow: { flexDirection: "row", gap: 10 },

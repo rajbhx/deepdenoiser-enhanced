@@ -162,6 +162,7 @@ const cacheApi = load('denoiseCache', {
     '@/assets/model/model_metadata.json':{hop_size:512,fft_size:960},
     'expo-file-system':stubFs,
     './batchQueue':{ProcessingCancelled,throwIfCancelled},
+    './diagnostics':{recordDiagnostic(){},recordDiagnosticError(){}},
     './alignedDenoiseStream':load('alignedDenoiseStream'),
     './denoiserSingleton':{beginRun(){began++},endRun(){ended++},getDenoiser:async()=>assert.fail('no inference after cancellation')},
     './denoiseCache':{buildCacheKey:()=>'',buildDecodeKey:()=>'',buildDenoiseKey:()=>'',lookupCachedOutput:async()=>null,

@@ -10,6 +10,7 @@ import { claimSharedBatch, finishSharedBatch } from "@/src/scripts/shareClaim";
 import { importSharedMedia } from "@/src/scripts/sharedImport";
 import { isCurrentShare, useRawIncomingShare } from "@/src/scripts/useRawIncomingShare";
 import { useProcessingBusy } from "@/src/scripts/useProcessingBusy";
+import { recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
 import Feather from "@expo/vector-icons/Feather";
 import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
 import { File } from "expo-file-system";
@@ -41,6 +42,7 @@ export default function HomeScreen() {
     if (shareError) {
       if (reportedShareError.current !== shareError) {
         reportedShareError.current = shareError;
+        recordDiagnosticError("share", "share", shareError);
         Alert.alert("Could not read shared media", `${shareError.message}\nPlease share the files again.`, [
           { text: "Dismiss", onPress: discardUnreadable },
         ]);
@@ -55,9 +57,11 @@ export default function HomeScreen() {
     void (async () => {
       try {
         setLoadingLabel("Preparing shared files…"); setIsLoading(true);
+        recordDiagnostic("share", "share", "START");
         const selection = await importSharedMedia(sharedPayloads,
           (current, total) => setLoadingLabel(`Importing shared file ${current} of ${total}…`));
         navigatingFromShare.current = true;
+        recordDiagnostic("share", "share", "OK");
         consumeShare(sharedPayloads, shareGeneration);
         router.push({ pathname: "/processing/process", params: {
           fileuri: encodeURIComponent(selection[0].uri),
@@ -65,6 +69,7 @@ export default function HomeScreen() {
           batch: encodeURIComponent(JSON.stringify(selection)),
         } });
       } catch (copyError) {
+        recordDiagnosticError("share", "share", copyError);
         navigatingFromShare.current = false;
         consumeShare(sharedPayloads, shareGeneration);
         const message = copyError instanceof Error ? copyError.message : String(copyError);
@@ -82,11 +87,12 @@ export default function HomeScreen() {
   const handleImportFiles = async () => {
     if (importInFlightRef.current) return;
     importInFlightRef.current = true;
+    recordDiagnostic("import", "import", "START");
     setLoadingLabel("Opening file picker…"); setIsLoading(true);
     const added: SelectedMedia[] = [];
     try {
       const result = await pickDocument({ type: ["audio/*", "video/*"], copyToCacheDirectory: false, multiple: true });
-      if (result.canceled || !result.assets?.length) return;
+      if (result.canceled || !result.assets?.length) { recordDiagnostic("import", "import", "CANCELLED"); return; }
       const seen = new Set(files.map(item => item.uri));
       for (let i = 0; i < result.assets.length; i++) {
         const asset = result.assets[i];
@@ -102,7 +108,9 @@ export default function HomeScreen() {
         seen.add(imported.uri);
         added.push({ uri: imported.uri, name: asset.name, kind: readImportedMediaKind(imported) ?? detectedKind });
       }
+      recordDiagnostic("import", "import", "OK");
     } catch (importError) {
+      recordDiagnosticError("import", "import", importError);
       setError(importError instanceof Error ? importError : new Error(String(importError)));
       setIsErrorModalVisible(true);
     } finally {
@@ -214,7 +222,7 @@ export default function HomeScreen() {
         <Text style={theme.Styles.buttonText}>{files.length === 1 ? "Continue" : `Continue with ${files.length} files`}</Text><Feather name="arrow-right" size={20} color={theme.COLORS.background} style={{ marginLeft: 8 }} />
       </TouchableOpacity></View>}
       <SettingsSidebar visible={settingsVisible} onClose={() => setSettingsVisible(false)} />
-      <ErrorModal visible={isErrorModalVisible} error={error} onClose={() => setIsErrorModalVisible(false)} />
+      <ErrorModal context="import" visible={isErrorModalVisible} error={error} onClose={() => setIsErrorModalVisible(false)} />
     </SafeAreaView>
   );
 }

@@ -104,6 +104,10 @@ export default function SettingsSidebar({ visible, onClose }: SettingsSidebarPro
           </View>
           {saving && <Text accessibilityLiveRegion="polite" style={styles.description}>Saving settings…</Text>}
         </>}
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open diagnostics" style={styles.about} onPress={() => { close(); router.push("/diagnostics"); }}>
+          <Feather name="activity" size={19} color={theme.COLORS.primary} /><Text style={styles.aboutText}>Diagnostics &amp; self-check</Text>
+          <Feather name="chevron-right" size={18} color={theme.COLORS.subtext} />
+        </TouchableOpacity>
         <TouchableOpacity accessibilityRole="button" style={styles.about} onPress={() => { close(); router.push("/about"); }}>
           <Feather name="info" size={19} color={theme.COLORS.primary} /><Text style={styles.aboutText}>About DeepDenoiser</Text>
           <Feather name="chevron-right" size={18} color={theme.COLORS.subtext} />

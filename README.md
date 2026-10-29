@@ -1,4 +1,4 @@
-# DeepDenoiser Enhanced 2.0.1
+# DeepDenoiser Enhanced 2.0.2
 
 Offline AI audio and video denoising for Android using **DeepFilterNet3** and **ONNX Runtime**. This is a privacy-focused fork of [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser).
 
@@ -8,6 +8,14 @@ Offline AI audio and video denoising for Android using **DeepFilterNet3** and **
 - Native recordings are retained as the source of truth; live work is bounded and reconciled with the complete original. Open **Your files** from Home to recover recordings, reopen results and manage private copies.
 - Android exports use separate Music and Movies destinations. Settings and indexes use same-directory atomic replacement; failed native decoding/muxing is reported rather than published as complete.
 - Releases are unsigned unless a user-owned key is configured. CI's debug-signed artifacts are explicitly labeled **testing only**. See [release signing](docs/RELEASE_SIGNING.md).
+
+## Diagnostics (2.0.2 testing build)
+
+Open **Settings → Diagnostics & self-check**. The screen reports device/app status, an attempted model provider, permissions and a previous Android exit reason when available. A manual self-check uses synthetic data and uniquely created private temporary files; it is blocked while the recorder is active or its writer state is uncertain. Optional short runtime comparisons unload/reload the model but do not change saved settings. These checks do not certify audio quality, real background behavior or which hardware actually ran inference.
+
+Up to 50 structured events stay in memory by default. You can opt in to bounded history in app-specific no-backup storage, clear it, and preview a report before copying or sharing. The structured history excludes media, filenames, paths, URIs, media hashes and raw exception text. Other Android/system logs and the existing error dialog may still contain sensitive details. There is no automatic diagnostic upload. Native crashes, process death and the most recent events may not be captured.
+
+GitHub Actions saves the release JS source map and R8 mapping as a separate, time-limited diagnostic artifact alongside the APK. Artifact access follows the GitHub repository's visibility; it is not a private secret vault. Vendor native symbols may be unavailable. See `docs/DIAGNOSTICS.md` for the device checklist, privacy limits and symbolication guidance.
 
 ## What's new in 2.0
 
