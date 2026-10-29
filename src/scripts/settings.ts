@@ -1,4 +1,5 @@
 import { File, Paths } from "expo-file-system";
+import { atomicReplaceFile } from "@/modules/AudioProcessorModule";
 import { suggestCoreLevel } from "./deviceCores";
 
 export type CoreLevel = 2 | 4 | 8;
@@ -137,7 +138,7 @@ async function updateSettingsUnlocked(newSettings: Partial<AppSettings>): Promis
   const temp = new File(Paths.document, tempName);
   try {
     await temp.write(JSON.stringify(updatedSettings));
-    await temp.move(target, { overwrite: true });
+    await atomicReplaceFile(temp.uri, target.uri);
   } catch (error) {
     console.error("Error saving settings:", error);
     throw new Error(`Could not save settings: ${error instanceof Error ? error.message : String(error)}`);

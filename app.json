@@ -23,13 +23,14 @@
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
       ],
-      "versionCode": 2
+      "versionCode": 3
     },
     "plugins": [
       "./plugins/withNdkVersion",
       "./plugins/DisableDependencyInfo",
       "./plugins/withOnnxruntime",
       "./plugins/withLargeHeap",
+      "./plugins/withReleaseSigning",
       "expo-router",
       [
         "expo-build-properties",
@@ -107,6 +108,6 @@
       }
     },
     "owner": "deepdenoiser",
-    "version": "2.0.0"
+    "version": "2.0.1"
   }
 }

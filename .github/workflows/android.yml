@@ -83,6 +83,17 @@ jobs:
       - name: Regression tests (picker, audio, queue, storage and model)
         run: bun run test
 
+      - name: Atomic replacement regression (actual Java implementation)
+        run: |
+          mkdir -p "$RUNNER_TEMP/dd-atomic"
+          javac -d "$RUNNER_TEMP/dd-atomic" modules/AudioProcessorModule/android/src/main/java/expo/modules/audioprocessormodule/AtomicFileWriter.java tests/AtomicFileWriterTest.java
+          java -cp "$RUNNER_TEMP/dd-atomic" AtomicFileWriterTest
+
+      - name: Real bundled model regression (CPU)
+        run: |
+          npm install --prefix "$RUNNER_TEMP/dd-ort" --ignore-scripts --no-save --no-package-lock onnxruntime-node@1.24.3
+          NODE_PATH="$RUNNER_TEMP/dd-ort/node_modules" node tests/real-model.test.cjs
+
       - name: Expo Prebuild (Android only)
         run: bunx expo prebuild --platform android --clean --no-install
 
@@ -124,6 +135,37 @@ jobs:
             echo "artifact_pattern=**/*-release.apk" >> $GITHUB_OUTPUT
           fi
 
+      - name: Prepare signing
+        id: signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          BUILD_TYPE="${{ steps.build.outputs.build_type }}"
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            echo "mode=testing-debug-signed" >> "$GITHUB_OUTPUT"
+            echo "DD_ALLOW_DEBUG_SIGNING=true" >> "$GITHUB_ENV"
+          elif [ -n "$KEYSTORE_BASE64$STORE_PASSWORD$KEY_ALIAS$KEY_PASSWORD$EXPECTED_CERT" ]; then
+            for VALUE in "$KEYSTORE_BASE64" "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" "$EXPECTED_CERT"; do
+              [ -n "$VALUE" ] || { echo "::error::Release signing secrets are incomplete; see docs/RELEASE_SIGNING.md"; exit 1; }
+            done
+            KEYSTORE="$RUNNER_TEMP/deepdenoiser-release.keystore"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+            [ -s "$KEYSTORE" ] || { echo "::error::Decoded keystore is empty"; exit 1; }
+            chmod 600 "$KEYSTORE"
+            echo "DD_RELEASE_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+            echo "mode=production-signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No production signing key configured. This artifact is for testing only."
+            echo "DD_ALLOW_DEBUG_SIGNING=true" >> "$GITHUB_ENV"
+            echo "mode=testing-debug-signed" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build Android (Gradle)
         working-directory: android
         run: |
@@ -131,6 +173,9 @@ jobs:
           ./gradlew ${{ steps.build.outputs.gradle_task }} --no-daemon --stacktrace
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          DD_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          DD_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          DD_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
       - name: Verify native picker and content-hash functions
         # Prebuilt Expo AARs can silently ignore local Kotlin patches. Verify
@@ -148,10 +193,37 @@ jobs:
           TMP=$(mktemp -d)
           unzip -q "$BINARY" "$PATTERN" -d "$TMP"
           find "$TMP" -name '*.dex' -print0 | xargs -0 -r strings > "$TMP/dex-strings.txt"
-          for SYMBOL in cancelPendingPick copyFileWithSha256; do
+          for SYMBOL in cancelPendingPick copyFileWithSha256 atomicReplaceFile exportMediaFile STOP_TIMEOUT; do
             grep -Fq "$SYMBOL" "$TMP/dex-strings.txt" || { echo "::error::$SYMBOL missing from DEX"; exit 1; }
             echo "OK: $SYMBOL present in DEX"
           done
+
+      - name: Verify artifact signing certificate
+        shell: bash
+        env:
+          EXPECTED_CERT: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.build.outputs.build_type }}" = "release-aab" ]; then
+            BINARY=$(find android/app/build/outputs/bundle -name '*.aab' | head -1)
+            keytool -J-Duser.language=en -printcert -jarfile "$BINARY" > "$RUNNER_TEMP/cert.txt"
+            ACTUAL=$(sed -n 's/.*SHA256: *//p' "$RUNNER_TEMP/cert.txt" | head -1)
+          else
+            BINARY=$(find android/app/build/outputs/apk -name '*.apk' | head -1)
+            APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+            "$APKSIGNER" verify --verbose --print-certs "$BINARY" > "$RUNNER_TEMP/cert.txt"
+            ACTUAL=$(sed -n 's/.*certificate SHA-256 digest: *//p' "$RUNNER_TEMP/cert.txt" | head -1)
+          fi
+          [ -n "$ACTUAL" ] || { echo "::error::Could not read the artifact certificate"; exit 1; }
+          echo "Signing certificate SHA-256: $ACTUAL"
+          if [ "${{ steps.signing.outputs.mode }}" = "production-signed" ]; then
+            if grep -qi 'CN=Android Debug' "$RUNNER_TEMP/cert.txt"; then
+              echo "::error::Production artifact uses a debug certificate"; exit 1
+            fi
+            NORMAL_ACTUAL=$(printf '%s' "$ACTUAL" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+            NORMAL_EXPECTED=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+            [ "$NORMAL_ACTUAL" = "$NORMAL_EXPECTED" ] || { echo "::error::Signing certificate fingerprint does not match ANDROID_CERT_SHA256"; exit 1; }
+          fi
 
       - name: Locate artifacts
         id: locate
@@ -166,7 +238,7 @@ jobs:
       - name: Upload APK / AAB
         uses: actions/upload-artifact@v4
         with:
-          name: deepdenoiser-${{ steps.build.outputs.build_type }}-arm64
+          name: deepdenoiser-${{ steps.signing.outputs.mode }}-${{ steps.build.outputs.build_type }}-arm64
           path: |
             android/app/build/outputs/apk/**/*.apk
             android/app/build/outputs/bundle/**/*.aab
@@ -178,4 +250,8 @@ jobs:
           echo "### DeepDenoiser Arm64 Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "- Build type: ${{ steps.build.outputs.build_type }}" >> $GITHUB_STEP_SUMMARY
           echo "- Target: arm64-v8a · minSdk 26 · NNAPI + XNNPACK" >> $GITHUB_STEP_SUMMARY
+          echo "- Signing: ${{ steps.signing.outputs.mode }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.signing.outputs.mode }}" = "testing-debug-signed" ]; then
+            echo "- **Testing only**: debug-signed; do not distribute as a production release." >> $GITHUB_STEP_SUMMARY
+          fi
           echo "- Artifacts uploaded." >> $GITHUB_STEP_SUMMARY

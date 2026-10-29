@@ -43,7 +43,7 @@ function load(file, stubs={}) {
 let copyCount=0;
 const cacheApi = load('denoiseCache', {
   '@/assets/model/model_metadata.json':{hop_size:512,fft_size:960},
-  '@/modules/AudioProcessorModule':{copyFileWithSha256:async (source,dest) => {
+  '@/modules/AudioProcessorModule':{atomicReplaceFile: async (src,dst)=>{await fs.promises.rename(filePath(src),filePath(dst));return dst}, copyFileWithSha256:async (source,dest) => {
     copyCount++;
     const bytes=await fs.promises.readFile(filePath(source));
     await fs.promises.writeFile(filePath(dest),bytes);
@@ -90,6 +90,7 @@ const cacheApi = load('denoiseCache', {
     '@/assets/model/model_metadata.json':{hop_size:512,fft_size:960},
     'expo-file-system':stubFs,
     './batchQueue':{ProcessingCancelled,throwIfCancelled},
+    './alignedDenoiseStream':load('alignedDenoiseStream'),
     './denoiserSingleton':{beginRun(){began++},endRun(){ended++},getDenoiser:async()=>assert.fail('no inference after cancellation')},
     './denoiseCache':{buildCacheKey:()=>'',buildDecodeKey:()=>'',buildDenoiseKey:()=>'',lookupCachedOutput:async()=>null,
       lookupDecodedPCM:async()=>null,stagePcmPath:()=> 'stage_dec_test.pcm', lookupDenoisedPCM:async()=>null},

@@ -21,6 +21,8 @@ export function endRun(): void {
   if (activeRuns === 0 && pendingReset) void resetDenoiser();
 }
 export function getEngineLabel(): string { return instance?.lastEngine ?? "not-loaded"; }
+/** Used to avoid deleting app-owned media while a pipeline is using it. */
+export function isProcessingMedia(): boolean { return activeRuns > 0; }
 
 export function resetDenoiser(): Promise<void> {
   if (activeRuns > 0) { pendingReset = true; return Promise.resolve(); }

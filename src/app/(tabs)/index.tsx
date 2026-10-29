@@ -122,6 +122,9 @@ export default function HomeScreen() {
               <Text style={styles.eyebrow}>PRIVATE · ON-DEVICE AI</Text>
               <Text style={styles.title}>DeepDenoiser</Text>
             </View>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open your files" onPress={() => router.push("/history")} style={styles.settings}>
+              <Feather name="folder" size={21} color={theme.COLORS.text} />
+            </TouchableOpacity>
             <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open settings" onPress={() => setSettingsVisible(true)} style={styles.settings}>
               <Feather name="settings" size={21} color={theme.COLORS.text} />
             </TouchableOpacity>

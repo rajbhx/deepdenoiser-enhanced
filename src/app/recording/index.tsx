@@ -9,7 +9,10 @@ import ShareBtn from "@/src/components/shareBtn";
 import SilenceTrimSettingsBlock from "@/src/components/silenceTrimSettings";
 import * as theme from "@/src/constants/theme";
 import { trackAppError, trackAppEvent } from "@/src/scripts/analytics";
-import type { DeepFilterNet, StreamState } from "@/src/scripts/Denoiser";
+import type { DeepFilterNet } from "@/src/scripts/Denoiser";
+import { AlignedDenoiseStream } from "@/src/scripts/alignedDenoiseStream";
+import { BoundedRecordingQueue, ensureRecordingWavHeader, reconcileRecording, recordingsDir } from "@/src/scripts/recordingSafety";
+import { processMedia } from "@/src/scripts/processMedia";
 import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
 import { PCMtoWav, writePCMChunk } from "@/src/scripts/formatHandler";
 import {
@@ -31,6 +34,7 @@ import {
 import * as fs from "expo-file-system";
 import { requestRecordingPermissionsAsync } from "expo-audio";
 import { useRouter } from "expo-router";
+import { usePreventRemove } from "expo-router/react-navigation";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -46,14 +50,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 const SAMPLE_RATE = 48000;
 const HOP_SIZE = metadata.hop_size;
-const FFT_SIZE = metadata.fft_size;
 const ALSTEPS = [0, 5, 10, 15, 20, 30, 40];
 /** Mic emit interval (ms). 40ms = lower lag on OnePlus 7 when XNNPACK keeps up. */
 const STREAM_INTERVAL_MS = 40;
-/** Safety valve: max queued chunks before raw passthrough (~4s at 40ms). */
+/** Bound both the number and size of retained live events. */
 const MAX_QUEUED_CHUNKS = 100;
-/** Exit passthrough only after backlog is small (hysteresis). */
-const PASSTHROUGH_RESUME_AT = 30;
+const MAX_QUEUED_SAMPLES = SAMPLE_RATE * 4;
 
 export default function RecordingScreen() {
   const router = useRouter();
@@ -81,6 +83,9 @@ export default function RecordingScreen() {
     null,
   );
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isCatchingUp, setIsCatchingUp] = useState(false);
+  const [finalizingText, setFinalizingText] = useState("Finalizing Audio...");
   const [error, setError] = useState<Error | null>(null);
   const [isErrorModalVisible, setIsErrorModalVisible] = useState(false);
   const [attenLimDb, setAttenLimDb] = useState(0);
@@ -97,41 +102,18 @@ export default function RecordingScreen() {
   }, []);
 
   const denoiserRef = useRef<DeepFilterNet | null>(null);
-  /** Per-recording recurrent state — never shared with the file pipeline. */
-  const streamRef = useRef<StreamState | null>(null);
+  const alignedRef = useRef<AlignedDenoiseStream | null>(null);
+  const queueRef = useRef<BoundedRecordingQueue | null>(null);
+  const nativeRecordingRef = useRef<fs.File | null>(null);
+  const acceptingStreamRef = useRef(false);
   const runActiveRef = useRef(false);
-  const audioBufferRef = useRef<Float32Array>(new Float32Array(0));
-  const outputSkipRef = useRef(0);
-  const recordingErrorRef = useRef<Error | null>(null);
-  const processingQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const queueDepthRef = useRef(0);
   const isStoppingRef = useRef(false);
   const isStartingRef = useRef(false);
   const isRecordingRef = useRef(isRecording);
   const [pausedDuration, setPausedDuration] = useState(0);
-  const isPausedRef = useRef(isPaused);
   const animRef = useRef<Animated.CompositeAnimation | null>(null);
   const [pulseAnim] = useState(() => new Animated.Value(1));
-  /** True while chunks are being written raw because the queue is backed up. */
-  const passthroughModeRef = useRef(false);
-  /** True when the previous chunk was written raw (used to reset model state). */
-  const wasPassthroughRef = useRef(false);
 
-  // Waits for every task currently chained on the processing queue. Re-checks
-  // until the chain is stable so a stream event racing the stop cannot append
-  // late work after the drain completed.
-  const drainQueue = async () => {
-    let chain = processingQueueRef.current;
-    while (true) {
-      await chain;
-      if (processingQueueRef.current === chain) break;
-      chain = processingQueueRef.current;
-    }
-  };
-
-  useEffect(() => {
-    isPausedRef.current = isPaused;
-  }, [isPaused]);
   useEffect(() => {
     isRecordingRef.current = isRecording;
   }, [isRecording]);
@@ -158,17 +140,13 @@ export default function RecordingScreen() {
     initDenoiser();
 
     return () => {
-      // Stop any in-flight recording when leaving the screen. The ONNX session
-      // itself is shared via the singleton and intentionally NOT released here
-      // (releasing it was leaking/racing and caused crashes). isStoppingRef must
-      // be set so late stream events are dropped instead of appending to the
-      // processing queue after the screen is gone.
-      isStoppingRef.current = true;
-      // Keep the model session alive until queued inference has actually
-      // drained; releasing it first could race an active processFrame().
+      // Ordinary Back/swipe navigation is prevented while recording. If the
+      // screen is nevertheless destroyed, the native file lives in the durable
+      // recordings folder and can be recovered from History on next launch.
+      acceptingStreamRef.current = false;
       const stop = isRecordingRef.current ? stopAudioRecording() : Promise.resolve();
       void stop.catch((err) => console.error("Failed to stop recording on unmount:", err))
-        .then(drainQueue)
+        .then(() => queueRef.current?.drain())
         .catch((err) => console.error("Failed to drain recording queue:", err))
         .finally(() => {
           if (runActiveRef.current) { runActiveRef.current = false; endRun(); }
@@ -203,111 +181,21 @@ export default function RecordingScreen() {
   }, [isRecording, isPaused, pulseAnim]);
 
   const handleAudioStream = async (event: AudioDataEvent) => {
-    if (isPausedRef.current || !denoiserRef.current || isStoppingRef.current)
+    if (!acceptingStreamRef.current) return;
+    const queue = queueRef.current;
+    if (!queue || queue.overloaded || queue.error) return;
+    if (!(event.data instanceof Float32Array)) {
+      queue.error = new Error("Recorder returned an unexpected stream format");
+      setIsCatchingUp(true);
       return;
-
-    // Copy buffer immediately — the source may reuse the underlying ArrayBuffer
-    const eventData = event.data as Float32Array;
-    if (!eventData || eventData.length === 0) return;
-    const float32Data = new Float32Array(eventData);
-
-    // If the denoise queue is hopelessly behind (slow device), write the raw
-    // PCM for this chunk instead of dropping audio — the denoised file stays
-    // time-aligned with the original and memory stays bounded. Hysteresis
-    // (stay in passthrough until the backlog is nearly empty) prevents
-    // oscillating between raw and denoised every chunk.
-    const passthrough = passthroughModeRef.current
-      ? queueDepthRef.current >= PASSTHROUGH_RESUME_AT
-      : queueDepthRef.current >= MAX_QUEUED_CHUNKS;
-    if (passthrough) {
-      passthroughModeRef.current = true;
-      console.warn(
-        "Recording denoise queue backlogged — writing raw PCM chunk instead.",
-      );
-    } else {
-      passthroughModeRef.current = false;
     }
-    queueDepthRef.current++;
-
-    processingQueueRef.current = processingQueueRef.current
-      .then(async () => {
-        try {
-          const denoiser = denoiserRef.current;
-          if (!denoiser) return;
-
-          // Original PCM write starts in parallel with denoise (OnePlus 7 / SD855).
-          const origFile = originalPcmFileRef.current;
-          const origWrite = origFile
-            ? writePCMChunk(origFile, float32Data, true)
-            : Promise.resolve();
-
-          const denFile = denoisedPcmFileRef.current;
-          if (denFile) {
-            const combined = new Float32Array(
-              audioBufferRef.current.length + float32Data.length,
-            );
-            combined.set(audioBufferRef.current);
-            combined.set(float32Data, audioBufferRef.current.length);
-
-            const numFrames = Math.floor(combined.length / HOP_SIZE);
-            const processableLength = numFrames * HOP_SIZE;
-            const leftovers = combined.subarray(processableLength);
-
-            if (numFrames > 0) {
-              const processData = combined.subarray(0, processableLength);
-              const denoisedOutput = new Float32Array(processableLength);
-
-              if (passthrough) {
-                denoisedOutput.set(processData);
-              } else {
-                if (wasPassthroughRef.current) {
-                  streamRef.current = denoiser.createStream(attenLimDb);
-                }
-                const stream = streamRef.current;
-                if (!stream) throw new Error("Denoise stream not initialized");
-                for (let i = 0; i < processableLength; i += HOP_SIZE) {
-                  const frame = processData.subarray(i, i + HOP_SIZE);
-                  await denoiser.processFrame(stream, frame, denoisedOutput, i);
-                }
-              }
-              wasPassthroughRef.current = passthrough;
-              // Match the file pipeline: prime by fftSize samples and discard
-              // the same amount from model output, preserving timeline length.
-              const skip = Math.min(outputSkipRef.current, denoisedOutput.length);
-              outputSkipRef.current -= skip;
-              const alignedOutput = denoisedOutput.subarray(skip);
-              await Promise.all([
-                alignedOutput.length ? writePCMChunk(denFile, alignedOutput, true) : Promise.resolve(),
-                origWrite,
-              ]);
-            } else {
-              await origWrite;
-            }
-
-            audioBufferRef.current = new Float32Array(leftovers);
-          } else {
-            await origWrite;
-          }
-        } catch (err) {
-          console.error("Error in audio stream processing:", err);
-          recordingErrorRef.current ??= err instanceof Error ? err : new Error(String(err));
-        }
-      })
-      .catch((err) => {
-        // Unreachable in practice (the task body catches everything), but if it
-        // ever fires, do NOT reset the chain — resetting would let newly
-        // enqueued tasks run concurrently with in-flight ones and interleave
-        // writes to the same PCM files.
-        console.error("Error in recording processing queue:", err);
-      })
-      .finally(() => {
-        queueDepthRef.current = Math.max(0, queueDepthRef.current - 1);
-      });
+    if (event.data.length && !queue.enqueue(event.data)) setIsCatchingUp(true);
   };
 
   const startRecording = async () => {
     if (isStartingRef.current || isRecordingRef.current) return;
     isStartingRef.current = true;
+    setIsStarting(true);
     try {
       if (!denoiserReady) {
         Alert.alert("Wait", "Denoiser is still initializing...");
@@ -332,37 +220,54 @@ export default function RecordingScreen() {
 
       setFinalOriginalWav(null);
       setFinalDenoisedWav(null);
+      setIsCatchingUp(false);
       isStoppingRef.current = false;
-      audioBufferRef.current = new Float32Array(FFT_SIZE);
-      outputSkipRef.current = FFT_SIZE;
-      recordingErrorRef.current = null;
-      // Ensure any previous recording's queue has fully drained before
-      // replacing the chain — otherwise old and new tasks would run
-      // interleaved against the same shared model state.
-      await drainQueue();
-      processingQueueRef.current = Promise.resolve();
-      passthroughModeRef.current = false;
-      wasPassthroughRef.current = false;
+      nativeRecordingRef.current = null;
+      if (queueRef.current) await queueRef.current.drain();
 
-      // Reserve the shared session before obtaining it; a settings reset must
-      // not release it between stream creation and startAudioRecording().
+      // Reserve the shared model before creating a per-recording stream.
       if (!runActiveRef.current) { beginRun(); runActiveRef.current = true; }
-      denoiserRef.current = await getDenoiser();
-      streamRef.current = denoiserRef.current.createStream(attenLimDb);
+      const denoiser = await getDenoiser();
+      denoiserRef.current = denoiser;
+      const state = denoiser.createStream(attenLimDb);
+      const aligned = new AlignedDenoiseStream(HOP_SIZE, metadata.algorithmic_delay_samples,
+        frame => denoiser.processFrame(state, frame));
+      alignedRef.current = aligned;
+      queueRef.current = new BoundedRecordingQueue(MAX_QUEUED_CHUNKS, MAX_QUEUED_SAMPLES, async samples => {
+        // Retain a byte-exact prefix for comparison with the native WAV.
+        await writePCMChunk(origPcm, samples, true);
+        const cleaned = await aligned.push(samples);
+        if (cleaned.length) await writePCMChunk(denPcm, cleaned, true);
+      });
+      acceptingStreamRef.current = true;
+      const dir = recordingsDir();
+      // @siteed's Android API expects a filesystem path, not a file: URI.
+      const outputDirectory = decodeURIComponent(dir.uri.replace(/^file:\/\//, ""));
+      const recordingName = `recording_${timestamp}_${Math.random().toString(36).slice(2, 8)}_original`;
 
       const config: RecordingConfig = {
         sampleRate: SAMPLE_RATE,
         channels: 1,
         encoding: "pcm_16bit",
-        interval: STREAM_INTERVAL_MS, // 50ms — lower lag on Snapdragon 855 / OnePlus 7
+        interval: STREAM_INTERVAL_MS,
+        outputDirectory,
+        filename: recordingName,
         streamFormat: "float32",
         onAudioStream: handleAudioStream,
         keepAwake: true,
         showNotification: false,
       };
 
-      await startAudioRecording(config);
+      const started = await startAudioRecording(config);
+      nativeRecordingRef.current = new fs.File(started.fileUri);
+      isRecordingRef.current = true;
     } catch (error) {
+      acceptingStreamRef.current = false;
+      await queueRef.current?.drain();
+      // An empty failed-start scratch file has no recoverable audio.
+      for (const file of [originalPcmFileRef.current, denoisedPcmFileRef.current]) {
+        try { if (file?.exists && file.size === 0) file.delete(); } catch { /* best effort */ }
+      }
       if (runActiveRef.current) {
         runActiveRef.current = false;
         endRun();
@@ -373,6 +278,7 @@ export default function RecordingScreen() {
       setIsErrorModalVisible(true);
     } finally {
       isStartingRef.current = false;
+      setIsStarting(false);
     }
   };
 
@@ -380,96 +286,121 @@ export default function RecordingScreen() {
     if (isStoppingRef.current) return;
     isStoppingRef.current = true;
     let savedOriginal: fs.File | null = null;
+    let nativeStopped = false;
     try {
       setIsFinalizing(true);
-      isStoppingRef.current = true;
-      let stopError: unknown;
-      try { await stopAudioRecording(); } catch (err) { stopError = err; }
-
-      // Wait for all background processing to finish. drainQueue re-checks
-      // until the chain is stable — a stream event racing the stop can append
-      // a chunk after we captured the promise, which would otherwise write
-      // out of order.
-      await drainQueue();
-      if (stopError) throw stopError;
+      setFinalizingText("Stopping recorder...");
+      // Do not disable callbacks before native Stop: its final event can race
+      // this promise. The WAV reconciliation below also covers late callbacks.
+      const stopped = await stopAudioRecording();
+      nativeStopped = true;
+      isRecordingRef.current = false;
+      acceptingStreamRef.current = false;
+      const queue = queueRef.current;
+      if (queue) await queue.drain();
+      const nativeWav = stopped?.fileUri ? new fs.File(stopped.fileUri) : nativeRecordingRef.current;
+      if (!nativeWav?.exists || nativeWav.size <= 44) throw new Error("No audio was recorded. Please try again.");
+      const totalBytes = ensureRecordingWavHeader(nativeWav);
+      // This is the complete native file, already durable before denoising.
+      savedOriginal = nativeWav;
+      setFinalOriginalWav(nativeWav);
 
       const origPcm = originalPcmFileRef.current;
       const denPcm = denoisedPcmFileRef.current;
-
-      if (origPcm && denPcm) {
-        if (!origPcm.exists || !denPcm.exists || origPcm.size === 0) {
-          throw new Error("No audio was recorded. Please try again.");
-        }
-        // Handle any remaining samples in the buffer
-        if (audioBufferRef.current.length > 0 && denoiserRef.current) {
-          const leftovers = audioBufferRef.current;
-          const paddedFrame = new Float32Array(HOP_SIZE);
-          paddedFrame.set(leftovers);
-          const outBuf = new Float32Array(HOP_SIZE);
-          const tailStream = streamRef.current;
-          if (!tailStream) throw new Error("Denoise stream not initialized");
-          const outFrame = wasPassthroughRef.current
-            ? paddedFrame
-            : await denoiserRef.current.processFrame(tailStream, paddedFrame, outBuf);
-          let tail = outFrame.subarray(0, leftovers.length);
-          const skip = Math.min(outputSkipRef.current, tail.length);
-          outputSkipRef.current -= skip;
-          tail = tail.subarray(skip);
-          if (tail.length) await writePCMChunk(denPcm, tail, true);
-          audioBufferRef.current = new Float32Array(0);
-        }
-
-        // Save the original first so it survives even if denoising/finalization fails.
-        const timestamp = Date.now();
-        const origWav = (await PCMtoWav(origPcm, SAMPLE_RATE)).file;
-        savedOriginal = await placeOutput(origWav, `recording_${timestamp}_original.wav`);
-        setFinalOriginalWav(savedOriginal);
-        if (recordingErrorRef.current) {
-          throw new Error(`Denoising failed; the original recording was kept. ${recordingErrorRef.current.message}`);
-        }
-        // Trim is applied HERE, at finalization — only after the entire
-        // recording has been denoised and the queue fully drained. It never
-        // runs during recording, and only when the user explicitly enabled it
-        // (the toggle-off case must be honored, so disabled => no trim map).
-        const denWavResult = await PCMtoWav(
-          denPcm,
-          SAMPLE_RATE,
-          silenceTrim.enabled ? silenceTrim : undefined,
-        );
-        const savedDenoised = await placeOutput(denWavResult.file, `recording_${timestamp}_cleaned.wav`);
-        setFinalDenoisedWav(savedDenoised);
-      }
-    } catch (error) {
-      // Best effort recovery of the raw recording if the model or native stop
-      // failed before the usual original-file commit.
-      const raw = originalPcmFileRef.current;
-      if (!savedOriginal && raw?.exists && raw.size > 0) {
+      const aligned = alignedRef.current;
+      let matches = false;
+      if (queue && !queue.error && origPcm && denPcm && aligned) {
         try {
-          const wav = (await PCMtoWav(raw, SAMPLE_RATE)).file;
-          savedOriginal = await placeOutput(wav, `recording_${Date.now()}_original.wav`);
-          setFinalOriginalWav(savedOriginal);
-        } catch (recoveryError) { console.warn("Could not recover original recording:", recoveryError); }
+          setFinalizingText("Checking recording and finishing audio...");
+          matches = await reconcileRecording(nativeWav, origPcm, async samples => {
+            const cleaned = await aligned.push(samples);
+            if (cleaned.length) await writePCMChunk(denPcm, cleaned, true);
+          });
+          if (matches) {
+            const tail = await aligned.finish();
+            if (tail.length) await writePCMChunk(denPcm, tail, true);
+            if (denPcm.size !== totalBytes) throw new Error("Cleaned recording length does not match the original");
+          }
+        } catch (error) {
+          console.warn("Live recording could not be reconciled; processing complete original:", error);
+          matches = false;
+        }
       }
-      const err = error instanceof Error ? error : new Error(String(error));
-      trackAppError(err, { context: "stopRecording" });
-      setError(err);
-      setIsErrorModalVisible(true);
+      let savedDenoised: fs.File;
+      if (matches && denPcm) {
+        const denWavResult = await PCMtoWav(denPcm, SAMPLE_RATE,
+          silenceTrim.enabled ? silenceTrim : undefined);
+        savedDenoised = await placeOutput(denWavResult.file, `recording_${Date.now()}_cleaned.wav`);
+      } else {
+        // A stream error or non-prefix gap must never silently corrupt output.
+        // Reprocess the complete native recording instead.
+        setFinalizingText("Denoising complete recording...");
+        const result = await processMedia(nativeWav, nativeWav.name, false, {
+          attenLimDb,
+          normalize: { toggle: false, targetRMS: -14, maxPeakDb: -1 },
+          silenceTrim,
+        }, { cancelled: false }, p => setFinalizingText(`${p.stage} ${p.percent}%`));
+        savedDenoised = result.file;
+      }
+      setFinalDenoisedWav(savedDenoised);
+    } catch (error) {
+      acceptingStreamRef.current = false;
+      await queueRef.current?.drain();
+      if (!nativeStopped) {
+        const cause = error instanceof Error ? error : new Error(String(error));
+        setError(new Error(`Could not stop the recorder. Try Stop again or restart the app; the native recording is kept for recovery in Your files. ${cause.message}`));
+        setIsErrorModalVisible(true);
+      } else {
+        // A streamed prefix is only a partial emergency copy. The native file
+        // is also kept in Recordings for a later recovery attempt.
+        let partialRecovery = false;
+        const raw = originalPcmFileRef.current;
+        if (!savedOriginal && raw?.exists && raw.size > 0) {
+          try {
+            const wav = (await PCMtoWav(raw, SAMPLE_RATE)).file;
+            savedOriginal = await placeOutput(wav, `recording_${Date.now()}_partial_original.wav`);
+            partialRecovery = true;
+            setFinalOriginalWav(savedOriginal);
+          } catch (recoveryError) { console.warn("Could not recover the partial streamed recording:", recoveryError); }
+        }
+        const cause = error instanceof Error ? error : new Error(String(error));
+        const message = partialRecovery
+          ? "A partial backup was kept. Check Your files for the complete native recording."
+          : savedOriginal ? "The original was kept, but processing could not finish."
+            : "Recording could not be finalized. Check Your files for a recoverable original.";
+        const err = new Error(`${message} ${cause.message}`);
+        trackAppError(err, { context: "stopRecording" });
+        setError(err);
+        setIsErrorModalVisible(true);
+      }
     } finally {
-      if (runActiveRef.current) {
-        runActiveRef.current = false;
-        endRun();
-      }
+      if (nativeStopped && runActiveRef.current) { runActiveRef.current = false; endRun(); }
       setIsFinalizing(false);
       isStoppingRef.current = false;
-      for (const file of [originalPcmFileRef.current, denoisedPcmFileRef.current]) {
-        // Preserve the raw scratch recording if even recovery failed.
+      if (nativeStopped) for (const file of [originalPcmFileRef.current, denoisedPcmFileRef.current]) {
+        // Keep the streamed prefix if no durable original could be recovered.
         if (file === originalPcmFileRef.current && !savedOriginal) continue;
         try { if (file?.exists) file.delete(); } catch (err) { console.warn("Could not remove recording scratch file:", err); }
       }
-      originalPcmFileRef.current = null;
-      denoisedPcmFileRef.current = null;
+      if (nativeStopped) {
+        originalPcmFileRef.current = null;
+        denoisedPcmFileRef.current = null;
+        alignedRef.current = null;
+        queueRef.current = null;
+      }
     }
   };
+
+  usePreventRemove(isRecording || isFinalizing || isStarting, () => {
+    if (isFinalizing || isStarting) {
+      Alert.alert("Please wait", "Your recording is being prepared or saved.");
+      return;
+    }
+    Alert.alert("Recording in progress", "Stop and save this recording before leaving?", [
+      { text: "Keep recording", style: "cancel" },
+      { text: "Stop and save", onPress: () => { void stopRecording(); } },
+    ]);
+  });
 
   const formatTime = (ms: number) => {
     const seconds = Math.floor(ms / 1000);
@@ -494,7 +425,7 @@ export default function RecordingScreen() {
             styles.backButton,
             { opacity: pressed ? 0.7 : 1 },
           ]}
-          disabled={isRecording}
+          disabled={isFinalizing || isStarting}
           android_ripple={{
             color: "rgba(255, 255, 255, 0.1)",
             borderless: true,
@@ -535,7 +466,7 @@ export default function RecordingScreen() {
             <Host matchContents style={{ width: 48, height: 48 }} colorScheme="dark">
               <LoadingIndicator color={theme.COLORS.primary} />
             </Host>
-            <Text style={styles.statusText}>Finalizing Audio...</Text>
+            <Text style={styles.statusText}>{finalizingText}</Text>
           </View>
         ) : !finalOriginalWav ? (
           <View style={styles.controlsContainer}>
@@ -544,7 +475,7 @@ export default function RecordingScreen() {
                 ? "Ready to record"
                 : isPaused
                   ? "Recording paused"
-                  : "Denoising in Real-time"}
+                  : isCatchingUp ? "Recording safely — denoising will finish after stop" : "Denoising in Real-time"}
             </Text>
 
             {!isRecording && !isPaused ? (

@@ -35,6 +35,10 @@ class FakeFile {
 const settings = load('settings', {
   'expo-file-system': { File: FakeFile, Paths: { document: { uri: 'doc' } } },
   './deviceCores': { suggestCoreLevel: () => 4 },
+  '@/modules/AudioProcessorModule': { atomicReplaceFile: async (src,dst) => {
+    await delay(1); if (failMove) { failMove=false; throw new Error('simulated disk error'); }
+    files.set(dst, files.get(src)); files.delete(src); return dst;
+  } },
 });
 
 (async () => {
@@ -105,15 +109,24 @@ const settings = load('settings', {
   const model = load('Denoiser', {
     '@/assets/model/model_metadata.json': reordered,
     'onnxruntime-react-native': { Tensor, InferenceSession: { create: async () => session } },
+    './alignedDenoiseStream': load('alignedDenoiseStream', {}),
   });
   const denoiser = new model.DeepFilterNet();
   await denoiser.loadModel('file:///model.ort','cpu',4);
   const stream = denoiser.createStream(0);
+  const erb = stream.stateBuffers[actual.state_input_names.indexOf('erb_norm_state')];
+  const band = stream.stateBuffers[actual.state_input_names.indexOf('band_unit_norm_state')];
+  assert.equal(erb[0], -60); assert.equal(erb[erb.length - 1], -90);
+  assert.ok(Math.abs(band[0] - 0.001) < 1e-9); assert.ok(Math.abs(band[band.length - 1] - 0.0001) < 1e-9);
   const output = await denoiser.processFrame(stream,new Float32Array(actual.hop_size));
   assert.equal(output[0],0.25);
   actual.state_input_names.forEach((name,index) => {
     assert.ok(feedNames.includes(name));
     assert.equal(stream.stateBuffers[index][0],index+1,`state mapping for ${name}`);
   });
-  console.log('PASS model state mapping uses names rather than metadata order');
+  console.log('PASS model normalization initialization and state mapping use correct names');
+  session.run = async () => ({enhanced_audio_frame: {data: new Float32Array(actual.hop_size).fill(NaN)}});
+  await assert.rejects(() => denoiser.processFrame(stream, new Float32Array(actual.hop_size)), /non-finite/);
+  await assert.rejects(() => denoiser.processFrame(stream, Float32Array.from([NaN])), /non-finite/);
+  console.log('PASS non-finite model output and inputs are rejected rather than silently saved');
 })().catch(error => { console.error(error); process.exitCode = 1; });

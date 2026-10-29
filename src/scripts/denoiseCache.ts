@@ -1,5 +1,5 @@
 import metadata from "@/assets/model/model_metadata.json";
-import { copyFileWithSha256 } from "@/modules/AudioProcessorModule";
+import { atomicReplaceFile, copyFileWithSha256 } from "@/modules/AudioProcessorModule";
 import * as fs from "expo-file-system";
 import { sanitizeFileName } from "./formatHandler";
 
@@ -13,14 +13,14 @@ const MAX_CACHED_OUTPUTS = 100;
 const MAX_CACHED_DECODES = 5;
 const MAX_CACHED_DENOISES = 8;
 /** Bump when the model, input framing or resampler changes. */
-const PIPELINE_VERSION = "dfn3-v2-streaming-resampler";
+const PIPELINE_VERSION = "dfn3-v3-aligned-normalized-mix";
 
 interface CacheEntry { path: string; createdAt: number }
 interface DecodeEntry extends CacheEntry { sampleRate: number }
 type DenoiseEntry = CacheEntry;
 type CacheIndex = Record<string, CacheEntry>;
 
-function importsDir(): fs.Directory {
+export function importsDir(): fs.Directory {
   const dir = new fs.Directory(fs.Paths.document, IMPORTS_DIR_NAME);
   if (!dir.exists) dir.create({ idempotent: true, intermediates: true });
   return dir;
@@ -151,11 +151,12 @@ async function readJsonIndex<T>(fileName: string): Promise<Record<string, T>> {
 
 async function writeJsonIndex<T>(fileName: string, index: Record<string, T>): Promise<void> {
   const temp = new fs.File(fs.Paths.document, `${fileName}.${uniqueSuffix()}.tmp`);
+  const target = new fs.File(fs.Paths.document, fileName);
   try {
     await temp.write(JSON.stringify(index), { encoding: "utf8" });
-    await temp.move(new fs.File(fs.Paths.document, fileName), { overwrite: true });
+    await atomicReplaceFile(temp.uri, target.uri);
   } finally {
-    // temp moves to the target on success; only clean a still-temporary URI.
+    // Only the temporary path may be cleaned; the old/new index is never deleted.
     if (temp.name.endsWith(".tmp") && temp.exists) {
       try { temp.delete(); } catch { /* best effort */ }
     }
@@ -200,7 +201,7 @@ export function buildCacheKey(
 }
 
 export function buildDecodeKey(input: fs.File): string {
-  return ["dec-v2", buildInputIdentity(input)].join("|");
+  return ["dec-v3-full-eos", buildInputIdentity(input)].join("|");
 }
 
 export function buildDenoiseKey(
@@ -282,7 +283,7 @@ export function storeDenoisedPCM(key: string, file: fs.File): Promise<void> {
   });
 }
 
-/** Remove only old, unindexed scratch files. Never sweep picker files or finished WAV/MP4s. */
+/** Remove old unindexed scratch, but never sweep streamed original backups or finished media. */
 export async function cleanupTempCache(): Promise<void> {
   try {
     const decode = await withIndexLock(DECODE_INDEX_NAME, () => readJsonIndex<DecodeEntry>(DECODE_INDEX_NAME));
@@ -291,7 +292,7 @@ export async function cleanupTempCache(): Promise<void> {
     const cache = new fs.Directory(fs.Paths.cache);
     if (!cache.exists) return;
     const olderThan = Date.now() - 24 * 60 * 60 * 1000;
-    const patterns = [/^orig_\d+\.pcm$/, /^den_\d+\.pcm$/, /^processed_\d+\.pcm$/,
+    const patterns = [/^den_\d+\.pcm$/, /^processed_\d+\.pcm$/,
       /^stage_(dec|dn)_\d+_[a-z0-9]+\.pcm$/, /^remux_\d+\.mp4$/];
     for (const entry of cache.list()) {
       if (entry instanceof fs.Directory || protectedPaths.has(entry.uri)) continue;

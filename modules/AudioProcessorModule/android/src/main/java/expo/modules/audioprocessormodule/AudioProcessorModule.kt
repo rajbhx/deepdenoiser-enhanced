@@ -128,6 +128,35 @@ class AudioProcessorModule : Module() {
             }
         }
 
+        AsyncFunction("exportMediaFile") {
+                sourceUri: String,
+                filename: String,
+                album: String,
+                video: Boolean,
+                promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = appContext.reactContext ?: throw Exception("React Context is null")
+                    promise.resolve(MediaExporter(context).export(sourceUri, filename, album, video))
+                } catch (e: Exception) {
+                    promise.reject("ERR_MEDIA_EXPORT", e.message ?: e.toString(), e)
+                }
+            }
+        }
+
+        AsyncFunction("atomicReplaceFile") {
+                sourceUri: String,
+                targetUri: String,
+                promise: Promise ->
+            moduleScope.launch {
+                try {
+                    promise.resolve(AtomicFileWriter.replace(sourceUri, targetUri))
+                } catch (e: Exception) {
+                    promise.reject("ERR_ATOMIC_REPLACE", e.message ?: e.toString(), e)
+                }
+            }
+        }
+
         AsyncFunction("getFileSize") {
                 path: String,
                 promise: Promise ->

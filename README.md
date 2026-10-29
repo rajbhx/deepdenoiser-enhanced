@@ -1,6 +1,13 @@
-# DeepDenoiser Enhanced 2.0
+# DeepDenoiser Enhanced 2.0.1
 
 Offline AI audio and video denoising for Android using **DeepFilterNet3** and **ONNX Runtime**. This is a privacy-focused fork of [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser).
+
+## Fixes in 2.0.1
+
+- Correct DeepFilterNet normalization initialization, delay compensation and tail flushing; strength now adjusts an aligned dry/wet mix. Cached audio from older pipelines is not reused.
+- Native recordings are retained as the source of truth; live work is bounded and reconciled with the complete original. Open **Your files** from Home to recover recordings, reopen results and manage private copies.
+- Android exports use separate Music and Movies destinations. Settings and indexes use same-directory atomic replacement; failed native decoding/muxing is reported rather than published as complete.
+- Releases are unsigned unless a user-owned key is configured. CI's debug-signed artifacts are explicitly labeled **testing only**. See [release signing](docs/RELEASE_SIGNING.md).
 
 ## What's new in 2.0
 
@@ -27,7 +34,14 @@ bunx expo prebuild --platform android --clean --no-install
 cd android && ./gradlew assembleRelease
 ```
 
-GitHub Actions uploads an arm64 APK as `deepdenoiser-release-apk-arm64`. The workflow verifies that the picker recovery and content-hash functions are present in the compiled DEX. Physical-device testing is still required before release; see [the 2.0 upgrade guide](docs/UPGRADE_2.0.md).
+The workflow runs mock regressions, an actual bundled-model CPU test, and a Java atomic-write test; it also verifies native symbols and the signing certificate in the artifact. Without release secrets, the arm64 APK is named `testing-debug-signed` and is **not for production**. Local release builds without a key are unsigned; see [release signing](docs/RELEASE_SIGNING.md). Physical-device testing is still required before release; see [the 2.0 upgrade guide](docs/UPGRADE_2.0.md).
+
+To run the real-model regression separately on a compatible desktop:
+
+```bash
+npm install --prefix /tmp/dd-ort --ignore-scripts --no-save --no-package-lock onnxruntime-node@1.24.3
+NODE_PATH=/tmp/dd-ort/node_modules node tests/real-model.test.cjs
+```
 
 ## Hardware notes
 

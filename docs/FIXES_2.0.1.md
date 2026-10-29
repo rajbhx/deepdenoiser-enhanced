@@ -1,0 +1,14 @@
+# DeepDenoiser 2.0.1 — audit fixes and remaining validation
+
+This update addresses the 2.0 audit in code while preserving offline inference, live recording and batch processing.
+
+- DeepFilterNet's two running normalization states use their model-defined initial values; the unit-normalization state has a positive floor. Non-finite input/output is rejected, not silently converted to silence.
+- The bundled model has no attenuation input. Strength therefore uses a dry/wet mix aligned to the model's measured 1,536-sample (32 ms at 48 kHz) delay: 0 dB is fully denoised; 40 dB is mostly original. Processing skips that intrinsic delay, flushes the model, and retains exactly the input sample count unless the user enables silence trimming.
+- Live recording uses bounded work queues. The native WAV, stored in private persistent Recordings from the start, is authoritative. At Stop the streamed prefix is compared byte-for-byte, missing tail samples are processed, and non-prefix/error cases fall back to processing the complete WAV. Android float events no longer include the WAV header. Back navigation is guarded. Interrupted WAV headers and old partial backups can be recovered through **Your files**; a partial backup is labeled as such.
+- **Your files** discovers results, recordings and imported copies directly from disk, with playback, export/share and explicit deletion. It includes older native recordings and partial cache backups where available. Android may evict cache backups; private files are removed on app-data clearing or uninstall. Export important media first.
+- Android 10+ exports app-created WAV/MP4 files through pending MediaStore entries without unrelated media-read permissions. Android 8/9 asks for legacy write permission. Audio goes under Music and video under Movies. Settings and cache indexes use atomic same-directory replacement, and decoder/mux failures do not commit incomplete media. Decode, denoise and output cache versions were changed; finished user files were not removed.
+- A release key is no longer implicitly replaced with the debug key. Configure a user-owned signing key and expected fingerprint as described in [RELEASE_SIGNING.md](RELEASE_SIGNING.md). Without a key, local releases are unsigned; GitHub Actions can explicitly produce a debug-signed artifact labeled **testing only**.
+
+## Validation
+
+The repository includes mock regression tests, tests of the actual Java atomic-file helper, and a CPU ONNX Runtime test using the bundled model and actual TypeScript processing pipeline. The latter checks strength, finite startup, alignment, tail preservation and extended silence. These tests do not exercise Android MediaCodec, MediaStore, recorder timing, navigation, NNAPI, or physical-device audio. Before relying on the app, test those paths, long recordings, app interruptions, storage pressure, background/foreground transitions, and A/V synchronization on representative Android versions and devices.

@@ -62,12 +62,15 @@ const format={
   mergeAudioVideo:async()=>{throw Error('unexpected video');},
   sanitizeFileName:s=>s,
 };
-const model={createStream:()=>({}),processFrame:async(_stream,input,dest,offset=0)=>{
+const model={createStream:()=>({delay:new Float32Array(1536),pos:0}),processFrame:async(stream,input,dest,offset=0)=>{
   frames++; if(frames===cancelAt)currentToken.cancelled=true;
-  dest.set(input,offset);return dest;
+  const output=dest??new Float32Array(512);
+  for(let i=0;i<input.length;i++){output[offset+i]=stream.delay[stream.pos];stream.delay[stream.pos]=input[i];stream.pos=(stream.pos+1)%stream.delay.length;}
+  return output;
 }};
 const pipeline=load('processMedia',{
-  '@/assets/model/model_metadata.json':{hop_size:512,fft_size:960},
+  '@/assets/model/model_metadata.json':{hop_size:512,fft_size:960,algorithmic_delay_samples:1536},
+  './alignedDenoiseStream':load('alignedDenoiseStream'),
   'expo-file-system':filesystem,
   './batchQueue':queue,
   './denoiseCache':cacheApi,

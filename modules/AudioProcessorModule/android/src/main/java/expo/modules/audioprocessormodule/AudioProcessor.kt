@@ -289,6 +289,7 @@ class MediaProcessor(private val context: Context) : Closeable {
                 var videoExtractor: MediaExtractor? = null
                 var audioExtractor: MediaExtractor? = null
                 var isMuxerStarted = false
+                var muxFinalizationError: Exception? = null
                 var pfd: ParcelFileDescriptor? = null
                 var transcodedTempPath: String? = null
 
@@ -421,6 +422,7 @@ class MediaProcessor(private val context: Context) : Closeable {
                     // need the track to start on a keyframe).
                     var videoTrimStarted = !trimEnabled
                     var videoSamplesWritten = 0
+                    var audioSamplesWritten = 0
 
                     while (!videoEOS || !audioEOS) {
                         if (++muxIterations > maxMuxIterations) {
@@ -476,27 +478,22 @@ class MediaProcessor(private val context: Context) : Closeable {
                                 bufferInfo.presentationTimeUs = audioExtractor.sampleTime
                                 bufferInfo.flags = audioExtractor.sampleFlags
                                 muxer.writeSampleData(audioMuxerTrack, buffer, bufferInfo)
+                                audioSamplesWritten++
                                 if (!audioExtractor.advance()) audioEOS = true
                             }
                         }
                     }
 
-                    if (trimEnabled && videoSamplesWritten == 0) {
-                        throw Exception(
-                                "Silence trim left no muxable video frames " +
-                                        "(window ${trimStartUs}us-${trimEndUs}us). " +
-                                        "Retry with silence trim disabled."
-                        )
+                    if (videoSamplesWritten == 0 || audioSamplesWritten == 0) {
+                        throw Exception("Muxed file would have an empty video or audio track")
                     }
                 } finally {
                     if (isMuxerStarted) {
-                        try {
-                            muxer?.stop()
-                        } catch (e: Exception) {
-                            // Log or ignore
-                        }
+                        try { muxer?.stop() } catch (e: Exception) { muxFinalizationError = e }
                     }
-                    muxer?.release()
+                    try { muxer?.release() } catch (e: Exception) {
+                        if (muxFinalizationError == null) muxFinalizationError = e
+                    }
                     videoExtractor?.release()
                     audioExtractor?.release()
                     transcodedTempPath?.let {
@@ -509,9 +506,19 @@ class MediaProcessor(private val context: Context) : Closeable {
                     try {
                         pfd?.close()
                     } catch (e: Exception) {
-                        // Ignore
+                        if (muxFinalizationError == null) muxFinalizationError = e
                     }
                 }
+                muxFinalizationError?.let { throw Exception("Failed to finalize MP4; no output was saved", it) }
+                // Verify the finished container before the JS layer promotes it
+                // into durable storage. A failure leaves only disposable scratch.
+                val verify = MediaExtractor()
+                try {
+                    setDataSource(verify, outputPath)
+                    if (findTrackIndex(verify, "video/") == -1 || findTrackIndex(verify, "audio/") == -1) {
+                        throw Exception("Finalized MP4 is missing an audio or video track")
+                    }
+                } finally { verify.release() }
                 outputPath
             }
 
@@ -577,11 +584,13 @@ class MediaProcessor(private val context: Context) : Closeable {
 
                     val info = MediaCodec.BufferInfo()
                     var isEOS = false
+                    var outputEOS = false
                     val timeoutUs = 10000L
-
+                    var consecutiveEosWaits = 0
+                    val maxConsecutiveEosWaits = 200 // 2 seconds with no output progress
                     var iterationCount = 0
                     val maxIterations = 1_000_000
-                    while (true) {
+                    while (!outputEOS) {
                         if (++iterationCount > maxIterations) {
                             throw Exception("decodeToPCM exceeded max iterations ($maxIterations)")
                         }
@@ -592,22 +601,10 @@ class MediaProcessor(private val context: Context) : Closeable {
                                     ?: throw Exception("Input buffer null for index $inIndex")
                                 val sampleSize = extractor.readSampleData(buffer, 0)
                                 if (sampleSize < 0) {
-                                    codec.queueInputBuffer(
-                                            inIndex,
-                                            0,
-                                            0,
-                                            0,
-                                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                                    )
+                                    codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                     isEOS = true
                                 } else {
-                                    codec.queueInputBuffer(
-                                            inIndex,
-                                            0,
-                                            sampleSize,
-                                            extractor.sampleTime,
-                                            0
-                                    )
+                                    codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
                                     extractor.advance()
                                 }
                             }
@@ -616,50 +613,12 @@ class MediaProcessor(private val context: Context) : Closeable {
                         val outIndex = codec.dequeueOutputBuffer(info, timeoutUs)
                         when {
                             outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                                if (isEOS) {
-                                    // AUD-04: drain EVERY remaining output buffer until
-                                    // the codec reports END_OF_STREAM. The old code
-                                    // broke after the first buffer, truncating the tail
-                                    // of decoded PCM on some devices/codecs.
-                                    var tryAgainCount = 0
-                                    var drainedEos = false
-                                    while (!drainedEos && tryAgainCount < 10) {
-                                        val drainIndex = codec.dequeueOutputBuffer(info, 20000L)
-                                        when {
-                                            drainIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                                                tryAgainCount++
-                                            }
-                                            drainIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                                                val newFormat = codec.outputFormat
-                                                if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
-                                                    channels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                                                    if (channels <= 0) channels = 1
-                                                }
-                                            }
-                                            drainIndex >= 0 -> {
-                                                val drainBuffer = codec.getOutputBuffer(drainIndex)
-                                                    ?: throw Exception("Output buffer null for index $drainIndex")
-                                                drainBuffer.position(info.offset)
-                                                drainBuffer.limit(info.offset + info.size)
-                                                if (info.size > 0) {
-                                                    if (channels > 1) {
-                                                        writeDownmixedMono(drainBuffer, info, channels, outputStream!!)
-                                                    } else {
-                                                        writeMonoChunk(drainBuffer, info, outputStream!!)
-                                                    }
-                                                }
-                                                val flags = info.flags
-                                                codec.releaseOutputBuffer(drainIndex, false)
-                                                if ((flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                                                    drainedEos = true
-                                                }
-                                            }
-                                        }
-                                    }
-                                    break
+                                if (isEOS && ++consecutiveEosWaits >= maxConsecutiveEosWaits) {
+                                    throw Exception("Decoder stalled before end of stream; incomplete audio was discarded")
                                 }
                             }
                             outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                                consecutiveEosWaits = 0
                                 val newFormat = codec.outputFormat
                                 if (newFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
                                     sampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -670,21 +629,23 @@ class MediaProcessor(private val context: Context) : Closeable {
                                 }
                             }
                             outIndex >= 0 -> {
+                                consecutiveEosWaits = 0
                                 val outBuffer = codec.getOutputBuffer(outIndex)
                                     ?: throw Exception("Output buffer null for index $outIndex")
-
                                 if (channels > 1 && info.size > 0) {
                                     writeDownmixedMono(outBuffer, info, channels, outputStream!!)
                                 } else if (info.size > 0) {
                                     writeMonoChunk(outBuffer, info, outputStream!!)
                                 }
-
+                                val flags = info.flags
                                 codec.releaseOutputBuffer(outIndex, false)
-                                if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0)
-                                        break
+                                outputEOS = (flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                             }
                         }
                     }
+                    outputStream?.flush()
+                    outputStream?.close()
+                    outputStream = null
                 } finally {
                     if (isCodecStarted) {
                         try {

@@ -1,5 +1,6 @@
 import metadata from "@/assets/model/model_metadata.json";
 import { InferenceSession, Tensor } from "onnxruntime-react-native";
+import { AlignedDenoiseStream } from "./alignedDenoiseStream";
 
 /** Recurrent state for ONE denoise stream. Never share between pipelines. */
 export interface StreamState {
@@ -9,12 +10,15 @@ export interface StreamState {
     attenLimDbData: Float32Array;
     inputFrameData: Float32Array;
     inputFrame: Tensor;
+    /** Dry signal delayed to match the causal model before mixing. */
+    dryDelay: Float32Array;
+    dryDelayIndex: number;
 }
 
 export class DeepFilterNet {
     private session: InferenceSession | null = null;
     private readonly hopSize: number;
-    private readonly fftSize: number;
+    private readonly delaySamples: number;
     private readonly stateInputNames: string[];
     private readonly stateOutputNames: string[];
     private readonly hasSingleStateTensor: boolean;
@@ -41,17 +45,20 @@ export class DeepFilterNet {
             attenLimDbData,
             inputFrameData,
             inputFrame,
+            dryDelay: new Float32Array(this.delaySamples),
+            dryDelayIndex: 0,
         };
     }
 
     /** Safe to call mid-stream (AUD-16): mutates the tensor's backing buffer. */
     public setStreamAttenLimDb(state: StreamState, value: number): void {
-        state.attenLimDbData[0] = value;
+        if (!Number.isFinite(value)) throw new Error("Invalid denoise strength");
+        state.attenLimDbData[0] = Math.max(0, Math.min(40, value));
     }
 
     constructor() {
         this.hopSize = metadata.hop_size;
-        this.fftSize = metadata.fft_size;
+        this.delaySamples = metadata.algorithmic_delay_samples;
         this.inputNames = metadata.inputs.map((i) => i.name);
         this.outputNames = metadata.outputs.map((o) => o.name);
 
@@ -167,6 +174,10 @@ export class DeepFilterNet {
         if (!this.session) throw new Error("Session not initialized");
 
         const { states, stateBuffers, attenLimDb, inputFrameData, inputFrame } = state;
+        if (frame.length > this.hopSize) throw new Error("Denoiser input exceeds one frame");
+        for (const sample of frame) {
+            if (!Number.isFinite(sample)) throw new Error("Input audio contains a non-finite sample");
+        }
 
         // Clear the tail so a short final frame never replays stale samples (AUD-15).
         inputFrameData.fill(0);
@@ -191,27 +202,49 @@ export class DeepFilterNet {
 
         const results = await this.session.run(feeds);
 
-        // Copy output state data back into the pre-allocated state tensors
-        // (buffer reuse — no new Tensor objects per frame, avoiding GC churn
-        // across the 100k+ frames of a long file).
-        if (this.hasSingleStateTensor) {
-            const nextStateRaw = results[this.stateOutputNames[0]].data as Float32Array;
-            stateBuffers[0].set(nextStateRaw);
-        } else {
-            for (let j = 0; j < this.stateInputNames.length; j++) {
-                const nextMultiStateRaw = results[this.stateOutputNames[j]].data as Float32Array;
-                stateBuffers[j].set(nextMultiStateRaw);
+        const outFrameRaw = results[this.outputNames[0]]?.data as Float32Array | undefined;
+        if (!outFrameRaw || outFrameRaw.length !== this.hopSize) {
+            throw new Error("Denoiser returned an invalid audio frame");
+        }
+        for (const sample of outFrameRaw) {
+            if (!Number.isFinite(sample)) {
+                throw new Error("Denoiser produced non-finite audio; no output was saved");
             }
         }
 
-        // Write output directly into `dest` when provided, avoiding an extra
-        // allocation + copy in the caller's hot loop.
-        const outFrameRaw = results[this.outputNames[0]].data as Float32Array;
-        if (dest) {
-            dest.set(outFrameRaw, destOffset);
-            return dest;
+        // Keep the recurrent normalization divisor positive. Long digital
+        // silence can otherwise underflow it to zero on Android accelerators.
+        for (let j = 0; j < stateBuffers.length; j++) {
+            const next = results[this.stateOutputNames[j]]?.data as Float32Array | undefined;
+            if (!next || next.length !== stateBuffers[j].length) {
+                throw new Error(`Denoiser returned invalid state: ${this.stateOutputNames[j]}`);
+            }
+            stateBuffers[j].set(next);
+            if (this.stateInputNames[j] === "band_unit_norm_state") {
+                for (let i = 0; i < stateBuffers[j].length; i++) {
+                    const value = stateBuffers[j][i];
+                    if (!Number.isFinite(value)) throw new Error("Denoiser normalization state is non-finite");
+                    stateBuffers[j][i] = Math.max(value, 1e-12);
+                }
+            }
         }
-        return outFrameRaw;
+
+        // This bundled model has no atten_lim_db input. Its UI convention is
+        // 0 dB = strongest and 40 dB = nearly original, so mix the output with
+        // a dry signal delayed by exactly the model's measured latency.
+        const output = dest ?? new Float32Array(this.hopSize);
+        const nativeStrength = this.inputNames.includes("atten_lim_db");
+        const wet = nativeStrength ? 1 : Math.pow(10, -state.attenLimDbData[0] / 20);
+        for (let i = 0; i < this.hopSize; i++) {
+            let dry = inputFrameData[i];
+            if (state.dryDelay.length) {
+                dry = state.dryDelay[state.dryDelayIndex];
+                state.dryDelay[state.dryDelayIndex] = inputFrameData[i];
+                state.dryDelayIndex = (state.dryDelayIndex + 1) % state.dryDelay.length;
+            }
+            output[destOffset + i] = outFrameRaw[i] * wet + dry * (1 - wet);
+        }
+        return output;
     }
 
     public async release(): Promise<void> {
@@ -249,6 +282,15 @@ export class DeepFilterNet {
             for (const meta of stateInputsMeta) {
                 const size = meta.shape.reduce((a, b) => a * b, 1);
                 const buffer = new Float32Array(size);
+                // DeepFilterNet's running statistics are not zero-initialized.
+                // A zero unit-norm state divides by zero on the first frame.
+                if (meta.name === "erb_norm_state" || meta.name === "band_unit_norm_state") {
+                    const start = meta.name === "erb_norm_state" ? -60 : 0.001;
+                    const end = meta.name === "erb_norm_state" ? -90 : 0.0001;
+                    for (let i = 0; i < size; i++) {
+                        buffer[i] = start + (end - start) * i / Math.max(1, size - 1);
+                    }
+                }
                 stateBuffers.push(buffer);
                 states.push(
                     new Tensor("float32", buffer, meta.shape),
@@ -256,7 +298,8 @@ export class DeepFilterNet {
             }
         }
 
-        const attenLimDbData = new Float32Array([attenLimDbValue]);
+        if (!Number.isFinite(attenLimDbValue)) throw new Error("Invalid denoise strength");
+        const attenLimDbData = new Float32Array([Math.max(0, Math.min(40, attenLimDbValue))]);
         const attenLimDb = new Tensor("float32", attenLimDbData, [1]);
         return { states, stateBuffers, attenLimDb, attenLimDbData };
     }
@@ -298,100 +341,33 @@ export class DeepFilterNet {
         onProgress?: ((p: number) => void) | ((p: number, i: number) => void),
         attenLimDbValue: number = 0.0,
     ): Promise<Float32Array[]> {
-        if (!this.session) throw new Error("Session not initialized");
-
-        const numFeeds = audioFeeds.length;
-        const origLen = audioFeeds[0].length;
-
-        // ALIGNMENT: Prepend fftSize zeros for delay compensation
-        const hopSizePadding = (this.hopSize - (origLen % this.hopSize)) % this.hopSize;
-        const totalPadding = this.fftSize + hopSizePadding;
-        const paddedLen = origLen + totalPadding;
-        const numSteps = Math.ceil(paddedLen / this.hopSize);
-
-        // Prepare resources for all feeds
-        const feedStates = audioFeeds.map(() => {
-            const { states, attenLimDb } = this.initStates(attenLimDbValue);
-            const inputFrameData = new Float32Array(this.hopSize);
-            const inputFrame = new Tensor("float32", inputFrameData, [this.hopSize]);
-            const paddedAudio = new Float32Array(paddedLen);
-            return {
-                states,
-                attenLimDb,
-                inputFrameData,
-                inputFrame,
-                paddedAudio,
-                enhancedAudio: new Float32Array(numSteps * this.hopSize),
-            };
-        });
-
-        // Initialize padded audio buffers
-        for (let i = 0; i < numFeeds; i++) {
-            feedStates[i].paddedAudio.set(audioFeeds[i], this.fftSize);
-        }
-
-        let lastReportedProgress = -1;
-
-        for (let step = 0; step < numSteps; step++) {
-            const start = step * this.hopSize;
-
-            const inferencePromises = feedStates.map(async (f) => {
-                f.inputFrameData.set(f.paddedAudio.subarray(start, start + this.hopSize));
-
-                const feeds: Record<string, Tensor> = {
-                    input_frame: f.inputFrame
-                };
-
-                if (this.inputNames.includes("atten_lim_db")) {
-                    feeds["atten_lim_db"] = f.attenLimDb;
-                }
-
-                if (this.hasSingleStateTensor) {
-                    feeds["states"] = f.states as Tensor;
-                } else {
-                    const stateTensors = f.states as Tensor[];
-                    for (let j = 0; j < stateTensors.length; j++) {
-                        feeds[this.stateInputNames[j]] = stateTensors[j];
-                    }
-                }
-
-                const results = await this.session!.run(feeds);
-
-                const outFrameRaw = results[this.outputNames[0]].data as Float32Array;
-                f.enhancedAudio.set(outFrameRaw, start);
-
-                if (this.hasSingleStateTensor) {
-                    const nextStateRaw = results[this.stateOutputNames[0]].data as Float32Array;
-                    f.states = new Tensor("float32", nextStateRaw, this.statesShape);
-                } else {
-                    const newStates: Tensor[] = [];
-                    for (let j = 0; j < this.stateInputNames.length; j++) {
-                        const nextMultiStateRaw = results[this.stateOutputNames[j]].data as Float32Array;
-                        const originalShape = (f.states as Tensor[])[j].dims;
-                        newStates.push(new Tensor("float32", nextMultiStateRaw, originalShape));
-                    }
-                    f.states = newStates;
-                }
-            });
-
-            await Promise.all(inferencePromises);
-
-            if (onProgress) {
-                const progress = Math.round(((step + 1) / numSteps) * 100);
-                if (progress > lastReportedProgress) {
-                    if (numFeeds > 1) {
-                        for (let i = 0; i < numFeeds; i++) {
-                            (onProgress as (p: number, i: number) => void)(progress, i);
-                        }
-                    } else {
-                        (onProgress as (p: number) => void)(progress);
-                    }
-                    lastReportedProgress = progress;
+        const results: Float32Array[] = [];
+        for (let i = 0; i < audioFeeds.length; i++) {
+            const feed = audioFeeds[i];
+            const state = this.createStream(attenLimDbValue);
+            const aligned = new AlignedDenoiseStream(this.hopSize, this.delaySamples, frame =>
+                this.processFrame(state, frame));
+            const chunks: Float32Array[] = [];
+            // Limit intermediate allocations for callers supplying long audio.
+            const chunkSize = this.hopSize * 100;
+            for (let offset = 0; offset < feed.length; offset += chunkSize) {
+                chunks.push(await aligned.push(feed.subarray(offset, offset + chunkSize)));
+                if (onProgress) {
+                    const progress = Math.round(Math.min(offset + chunkSize, feed.length) / feed.length * 99);
+                    if (audioFeeds.length > 1) (onProgress as (p: number, i: number) => void)(progress, i);
+                    else (onProgress as (p: number) => void)(progress);
                 }
             }
+            chunks.push(await aligned.finish());
+            const output = new Float32Array(feed.length);
+            let offset = 0;
+            for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.length; }
+            if (onProgress) {
+                if (audioFeeds.length > 1) (onProgress as (p: number, i: number) => void)(100, i);
+                else (onProgress as (p: number) => void)(100);
+            }
+            results.push(output);
         }
-
-        return feedStates.map(f => f.enhancedAudio.slice(this.fftSize, origLen + this.fftSize));
+        return results;
     }
-
 }

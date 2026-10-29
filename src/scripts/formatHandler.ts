@@ -2,11 +2,13 @@ import {
   decodeToPCM,
   extractAndTranscodeAudio,
   extractWavAudio,
+  exportMediaFile,
   mixAudioVideo,
   pcmToWav as nativePcmToWav
 } from "@/modules/AudioProcessorModule";
 import * as fs from "expo-file-system";
-import { Asset, Album, requestPermissionsAsync } from "expo-media-library";
+import { requestPermissionsAsync } from "expo-media-library";
+import { Platform } from "react-native";
 import { trackAppEvent } from "./analytics";
 import type { SilenceTrimSettings } from "./silenceTrim";
 import { trimToNativeConfig } from "./silenceTrim";
@@ -201,6 +203,7 @@ export async function writePCMChunk(
 ): Promise<void> {
   const pcmChunk = new Int16Array(chunk.length);
   for (let j = 0; j < pcmChunk.length; j++) {
+    if (!Number.isFinite(chunk[j])) throw new Error("Cannot write non-finite audio samples");
     let val = chunk[j] * 32768.0;
     if (val > 32767) val = 32767;
     else if (val < -32768) val = -32768;
@@ -223,6 +226,7 @@ export async function ArraytoPCM(f32array: Float32Array): Promise<fs.File> {
     const pcmChunk = new Int16Array(end - i);
 
     for (let j = 0; j < pcmChunk.length; j++) {
+      if (!Number.isFinite(f32array[i + j])) throw new Error("Cannot write non-finite audio samples");
       let val = f32array[i + j] * 32768.0;
       if (val > 32767) val = 32767;
       else if (val < -32768) val = -32768;
@@ -247,16 +251,17 @@ export async function ArraytoPCM(f32array: Float32Array): Promise<fs.File> {
   return outputFile;
 }
 export async function saveToDevice(file: fs.File, albumName = "DeepDenoiser"): Promise<boolean> {
-  const { status } = await requestPermissionsAsync();
-  if (status !== 'granted') return false;
-
   try {
-    const album = await Album.get(albumName);
-    if (album) {
-      await Asset.create(file.uri, album);
-    } else {
-      await Album.create(albumName, [file.uri]);
+    if (Platform.OS !== "android") throw new Error("Shared-media saving is supported on Android");
+    const video = /\.mp4$/i.test(file.name);
+    if (!video && !/\.wav$/i.test(file.name)) throw new Error("Unsupported output format");
+    // Android 10+ can add our own files without broad media-read permission.
+    // Android 8/9 still requires legacy write access.
+    if (Number(Platform.Version) < 29) {
+      const { status } = await requestPermissionsAsync(true, [video ? "video" : "audio"]);
+      if (status !== "granted") return false;
     }
+    await exportMediaFile(file.uri, file.name, albumName, video);
     trackAppEvent("save_file");
     return true;
   } catch (e) {

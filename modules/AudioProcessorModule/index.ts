@@ -78,3 +78,13 @@ export async function copyFileWithSha256(sourceUri: string, destUri: string): Pr
 export async function getFileSize(path: string): Promise<number> {
   return await AudioProcessorModule.getFileSize(path);
 }
+
+/** Atomically replace a local private file, preserving the old file on failure. */
+export async function atomicReplaceFile(sourceUri: string, targetUri: string): Promise<string> {
+  return await AudioProcessorModule.atomicReplaceFile(sourceUri, targetUri);
+}
+
+/** Save app-created media into the appropriate Android shared collection. */
+export async function exportMediaFile(sourceUri: string, filename: string, album: string, video: boolean): Promise<string> {
+  return await AudioProcessorModule.exportMediaFile(sourceUri, filename, album, video);
+}

@@ -229,6 +229,7 @@
     ],
     "hop_size": 512,
     "fft_size": 960,
+    "algorithmic_delay_samples": 1536,
     "frame_size": 512,
     "state_input_names": [
         "erb_norm_state",

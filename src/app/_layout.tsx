@@ -21,6 +21,6 @@ export default function RootLayout() {
   // only when recording starts, and media permission only when saving. A user
   // who denies either can still use the rest of the app.
   return <SafeAreaProvider><Stack screenOptions={{ headerShown: false }} initialRouteName="(tabs)">
-    <Stack.Screen name="(tabs)" /><Stack.Screen name="processing" />
+    <Stack.Screen name="(tabs)" /><Stack.Screen name="processing" /><Stack.Screen name="recording" /><Stack.Screen name="history" />
   </Stack></SafeAreaProvider>;
 }

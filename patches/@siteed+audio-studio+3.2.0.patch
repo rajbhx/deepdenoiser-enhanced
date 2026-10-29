@@ -1,113 +1,129 @@
 --- a/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioRecorderManager.kt
 +++ b/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioRecorderManager.kt
-@@ -225,7 +225,7 @@
-                 override fun resolve(value: Any?) {
-                     LogUtils.d(CLASS_NAME, "🔄 Successfully reinitialized AudioRecord with new device")
+@@ -227,3 +227,3 @@
                  }
 -                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                override fun reject(code: String?, message: String?, cause: Throwable?) {
                      LogUtils.e(CLASS_NAME, "🔄 Failed to reinitialize AudioRecord: $message")
-                 }
-             })) {
-@@ -237,7 +237,7 @@
-                             "isPaused" to true
-                         ))
+@@ -239,3 +239,3 @@
                      }
 -                    override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                    override fun reject(code: String?, message: String?, cause: Throwable?) {}
                  })
-                 return
-             }
-@@ -253,7 +253,7 @@
-                                 "isPaused" to true
-                             ))
+@@ -255,3 +255,3 @@
                          }
 -                        override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                        override fun reject(code: String?, message: String?, cause: Throwable?) {}
                      })
-                     return
-                 }
-@@ -297,7 +297,7 @@
-                         "error" to e.message
-                     ))
+@@ -299,3 +299,3 @@
                  }
 -                override fun reject(code: String, message: String?, cause: Throwable?) {}
 +                override fun reject(code: String?, message: String?, cause: Throwable?) {}
              })
-         }
-     }
-@@ -417,7 +417,7 @@
-                                     "isPaused" to true
-                                 ))
+@@ -419,3 +419,3 @@
                              }
 -                            override fun reject(code: String, message: String?, cause: Throwable?) {
 +                            override fun reject(code: String?, message: String?, cause: Throwable?) {
                                  LogUtils.e(CLASS_NAME, "Failed to pause recording on phone call", cause)
-                             }
-                         })
-@@ -444,7 +444,7 @@
-                                         "isPaused" to false
-                                     ))
+@@ -446,3 +446,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording after phone call", cause)
-                                 }
-                             })
-@@ -1226,7 +1226,7 @@
-                     override fun resolve(value: Any?) {
-                         LogUtils.d(CLASS_NAME, "⏺️ Successfully reinitialized AudioRecord for resumption")
+@@ -1036,1 +1036,7 @@
+                 recordingThread?.join(timeoutMs)
++                if (recordingThread?.isAlive == true) {
++                    // Do not claim a complete WAV while its writer is still open.
++                    // The app keeps the native file for later recovery.
++                    promise.reject("STOP_TIMEOUT", "Recording thread did not stop; the original file was kept", null)
++                    return
++                }
+@@ -1228,3 +1234,3 @@
                      }
 -                    override fun reject(code: String, message: String?, cause: Throwable?) {
 +                    override fun reject(code: String?, message: String?, cause: Throwable?) {
                          LogUtils.e(CLASS_NAME, "⏺️ Failed to reinitialize AudioRecord: $message")
-                         // We'll let the main try-catch handle this error
-                         throw IllegalStateException("Failed to reinitialize AudioRecord: $message")
-@@ -1936,7 +1936,7 @@
-                                         "isPaused" to true
-                                     ))
+@@ -1475,12 +1481,16 @@
+                 val accumulatedAnalysisData = ByteArrayOutputStream()  // Separate buffer for analysis
+-                audioFileHandler.writeWavHeader(
+-                    accumulatedAudioData!!,
+-                    recordingConfig.sampleRate,
+-                    recordingConfig.channels,
+-                    when (recordingConfig.encoding) {
+-                        "pcm_8bit" -> 8
+-                        "pcm_16bit" -> 16
+-                        "pcm_32bit" -> 32
+-                        else -> 16 // Default to 16 if the encoding is not recognized
+-                    }
+-                )
++                // Float PCM events must contain samples only. The WAV header
++                // belongs to the saved file, not the first live audio frame.
++                if (recordingConfig.streamFormat != "float32") {
++                    audioFileHandler.writeWavHeader(
++                        accumulatedAudioData!!,
++                        recordingConfig.sampleRate,
++                        recordingConfig.channels,
++                        when (recordingConfig.encoding) {
++                            "pcm_8bit" -> 8
++                            "pcm_16bit" -> 16
++                            "pcm_32bit" -> 32
++                            else -> 16 // Default to 16 if the encoding is not recognized
++                        }
++                    )
++                }
+@@ -1519,14 +1529,14 @@
+-                    val bytesRead = synchronized(audioRecordLock) {
+-                        audioRecord?.let {
+-                            if (it.state != AudioRecord.STATE_INITIALIZED) {
+-                                LogUtils.e(CLASS_NAME, "AudioRecord not initialized")
+-                                return@let -1
++                    // Stop joins this thread while holding audioRecordLock. Do not
++                    // acquire that same lock here or Stop can time out before the
++                    // writer closes. The read is non-blocking and Stop waits for it.
++                    val bytesRead = audioRecord?.let {
++                        if (it.state != AudioRecord.STATE_INITIALIZED) {
++                            LogUtils.e(CLASS_NAME, "AudioRecord not initialized")
++                            return@let -1
++                        }
++                        it.read(audioData, 0, bufferSizeInBytes, AudioRecord.READ_NON_BLOCKING).also { bytes ->
++                            if (bytes < 0) {
++                                LogUtils.e(CLASS_NAME, "AudioRecord read error: $bytes")
+                             }
+-                            // Use non-blocking read mode to allow quick thread exit
+-                            it.read(audioData, 0, bufferSizeInBytes, AudioRecord.READ_NON_BLOCKING).also { bytes ->
+-                                if (bytes < 0) {
+-                                    LogUtils.e(CLASS_NAME, "AudioRecord read error: $bytes")
+-                                }
+-                            }
+-                        } ?: -1 // Handle null case
+-                    }
++                        }
++                    } ?: -1
+@@ -1938,3 +1948,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to pause recording on audio focus loss")
-                                 }
-                             })
-@@ -1959,7 +1959,7 @@
-                                         "isPaused" to false
-                                     ))
+@@ -1961,3 +1971,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording on audio focus gain")
-                                 }
-                             })
-@@ -2006,7 +2006,7 @@
-                                         "isPaused" to true
-                                     ))
+@@ -2008,3 +2018,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to pause recording on audio focus loss")
-                                 }
-                             })
-@@ -2033,7 +2033,7 @@
-                                         "isPaused" to false
-                                     ))
+@@ -2035,3 +2045,3 @@
                                  }
 -                                override fun reject(code: String, message: String?, cause: Throwable?) {
 +                                override fun reject(code: String?, message: String?, cause: Throwable?) {
                                      LogUtils.e(CLASS_NAME, "Failed to resume recording on audio focus gain")
-                                 }
-                             })
-@@ -2139,7 +2139,7 @@
-             // Check permissions - create a dummy promise to avoid rejections
-             val dummyPromise = object : Promise {
+@@ -2141,3 +2151,3 @@
                  override fun resolve(value: Any?) {}
 -                override fun reject(code: String, message: String?, cause: Throwable?) { 
 +                override fun reject(code: String?, message: String?, cause: Throwable?) { 
                      LogUtils.e(CLASS_NAME, "Preparation error: $code - $message", cause)
-                 }
-             }
 --- a/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioStudioModule.kt
 +++ b/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/AudioStudioModule.kt
 @@ -252,7 +252,7 @@
@@ -168,3 +184,15 @@
                      Log.e("RecordingActionReceiver", "$action failed: $message", cause)
                      isProcessingAction.set(false)
                  }
+--- a/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/RecordingConfig.kt
++++ b/node_modules/@siteed/audio-studio/android/src/main/java/net/siteed/audiostudio/RecordingConfig.kt
+@@ -111,3 +111,3 @@
+                     .replace(Regex("^file://"), "")
+-                    .trim('/')
++                    .trimEnd('/')
+                     .replace("//", "/")
+@@ -153,3 +153,3 @@
+                     it.replace(Regex("^file://"), "")
+-                        .trim('/')
++                        .trimEnd('/')
+                         .replace("//", "/")

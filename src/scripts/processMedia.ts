@@ -1,6 +1,7 @@
 import metadata from "@/assets/model/model_metadata.json";
 import * as fs from "expo-file-system";
 import { beginRun, endRun, getDenoiser } from "./denoiserSingleton";
+import { AlignedDenoiseStream } from "./alignedDenoiseStream";
 import {
   buildCacheKey, buildDecodeKey, buildDenoiseKey, lookupCachedOutput,
   lookupDecodedPCM, lookupDenoisedPCM, placeOutput, stagePcmPath,
@@ -115,37 +116,26 @@ export async function processMedia(
       throwIfCancelled(token);
       const targetRate = 48000;
       const hopSize = metadata.hop_size;
-      const fftSize = metadata.fft_size;
       const stream = denoiser.createStream(settings.attenLimDb);
+      const aligned = new AlignedDenoiseStream(hopSize, metadata.algorithmic_delay_samples, async frame => {
+        throwIfCancelled(token);
+        return denoiser.processFrame(stream, frame);
+      });
       const staged = own(new fs.File(fs.Paths.cache, stagePcmPath("stage_dn")));
       denoisedPcmFile = staged;
-      let buffer = new Float32Array(fftSize);
-      let processedInput = 0, outputSkipped = 0;
+      let processedInput = 0;
       let firstWrite = true;
+      const write = async (samples: Float32Array) => {
+        if (!samples.length) return;
+        await writePCMChunk(staged, samples, !firstWrite);
+        firstWrite = false;
+      };
       const modelStart = Date.now();
       progress("Removing noise...");
       await readPCMChunks(pcmFile, sampleRate * 5, async (chunk, inputSamples) => {
         throwIfCancelled(token);
         if (settings.normalize.toggle) for (let i = 0; i < chunk.length; i++) chunk[i] *= globalGain;
-        const combined = new Float32Array(buffer.length + chunk.length);
-        combined.set(buffer); combined.set(chunk, buffer.length);
-        const processLen = Math.floor(combined.length / hopSize) * hopSize;
-        const toProcess = combined.subarray(0, processLen);
-        buffer = combined.slice(processLen);
-        const output = new Float32Array(processLen);
-        for (let i = 0; i < processLen; i += hopSize) {
-          throwIfCancelled(token);
-          await denoiser.processFrame(stream, toProcess.subarray(i, i + hopSize), output, i);
-        }
-        let final = output;
-        if (outputSkipped < fftSize) {
-          const skip = Math.min(fftSize - outputSkipped, final.length);
-          final = final.subarray(skip); outputSkipped += skip;
-        }
-        if (final.length > 0) {
-          await writePCMChunk(staged, final, !firstWrite);
-          firstWrite = false;
-        }
+        await write(await aligned.push(chunk));
         processedInput += inputSamples;
         const percent = Math.min(100, Math.round(processedInput / totalSamples * 100));
         const elapsed = (Date.now() - modelStart) / 1000;
@@ -153,17 +143,8 @@ export async function processMedia(
         progress("Removing noise...", percent, remaining > 0 && Number.isFinite(remaining) ? remainingTime(remaining) : null);
       }, sampleRate, targetRate);
       throwIfCancelled(token);
-      if (buffer.length > 0) {
-        const padded = new Float32Array(hopSize);
-        padded.set(buffer);
-        const frame = await denoiser.processFrame(stream, padded, new Float32Array(hopSize));
-        let final = frame.subarray(0, buffer.length);
-        if (outputSkipped < fftSize) {
-          const skip = Math.min(fftSize - outputSkipped, final.length);
-          final = final.subarray(skip);
-        }
-        if (final.length > 0) await writePCMChunk(staged, final, !firstWrite);
-      }
+      await write(await aligned.finish());
+      if (firstWrite) throw new Error("The audio contains no samples after resampling.");
       throwIfCancelled(token);
       try { await storeDenoisedPCM(denoiseKey, staged); retain(staged); }
       catch (error) { console.warn("Could not cache denoised audio:", error); }
