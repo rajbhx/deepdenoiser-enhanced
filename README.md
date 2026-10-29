@@ -27,7 +27,7 @@ Existing features include DeepFilterNet3, live microphone recording, strength pr
 Requires Bun **1.3.6**, Java 17 and Android SDK 36 / NDK r28b. The lockfile and exact native patches are committed.
 
 ```bash
-bun install --frozen-lockfile
+bun install --frozen-lockfile --backend=copyfile  # avoid mutating Bun's cache when patch-package runs
 bun run typecheck
 bun run test
 bunx expo prebuild --platform android --clean --no-install

@@ -66,12 +66,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
+          # Older cache entries may contain hard-linked, already-patched packages.
+          key: ${{ runner.os }}-bun-copy-v1-${{ hashFiles('bun.lock', 'patches/**/*.patch') }}
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        # patch-package edits files in place; hardlinks would mutate Bun's cache.
+        run: bun install --frozen-lockfile --backend=copyfile
 
       - name: Typecheck
         # Catches the 6 strict-mode errors fixed in this commit (AUD-02).
