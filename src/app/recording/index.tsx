@@ -280,7 +280,7 @@ export default function RecordingScreen() {
       denoiserRef.current = denoiser;
       const state = denoiser.createStream(attenLimDb);
       const aligned = new AlignedDenoiseStream(HOP_SIZE, metadata.algorithmic_delay_samples,
-        frame => denoiser.processFrame(state, frame));
+        (frame, output) => denoiser.processFrame(state, frame, output));
       alignedRef.current = aligned;
       queueRef.current = new BoundedRecordingQueue(MAX_QUEUED_CHUNKS, MAX_QUEUED_SAMPLES, async samples => {
         // Retain a byte-exact prefix for comparison with the native WAV.

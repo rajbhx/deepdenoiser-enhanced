@@ -10,6 +10,10 @@ export interface StreamState {
     attenLimDbData: Float32Array;
     inputFrameData: Float32Array;
     inputFrame: Tensor;
+    /** Stable tensor maps are owned by this stream and never shared with other streams. */
+    feeds: Record<string, Tensor>;
+    reusableOutputs: Record<string, Tensor> | null;
+    outputReuse: "probe" | "enabled" | "disabled";
     /** Dry signal delayed to match the causal model before mixing. */
     dryDelay: Float32Array;
     dryDelayIndex: number;
@@ -38,6 +42,14 @@ export class DeepFilterNet {
             this.initStates(attenLimDbValue);
         const inputFrameData = new Float32Array(this.hopSize);
         const inputFrame = new Tensor("float32", inputFrameData, [this.hopSize]);
+        const feeds: Record<string, Tensor> = { input_frame: inputFrame };
+        if (this.inputNames.includes("atten_lim_db")) feeds.atten_lim_db = attenLimDb;
+        if (this.hasSingleStateTensor) {
+            feeds.states = states as Tensor;
+        } else {
+            this.stateInputNames.forEach((name, index) => { feeds[name] = (states as Tensor[])[index]; });
+        }
+        const reusableOutputs = this.createReusableOutputs();
         return {
             states,
             stateBuffers,
@@ -45,6 +57,9 @@ export class DeepFilterNet {
             attenLimDbData,
             inputFrameData,
             inputFrame,
+            feeds,
+            reusableOutputs,
+            outputReuse: reusableOutputs ? "probe" : "disabled",
             dryDelay: new Float32Array(this.delaySamples),
             dryDelayIndex: 0,
         };
@@ -85,6 +100,8 @@ export class DeepFilterNet {
     }
 
     public lastEngine = "not-loaded";
+    /** Most recent stream's verified model-output path (for local diagnostics). */
+    public lastOutputBufferMode: "not-tested" | "reuse" | "standard" = "not-tested";
 
     public async loadModel(
         modelPath: string,
@@ -165,6 +182,80 @@ export class DeepFilterNet {
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
+    /** Preallocate fixed float outputs only; unknown/dynamic models use the standard path. */
+    private createReusableOutputs(): Record<string, Tensor> | null {
+        const outputs: Record<string, Tensor> = {};
+        for (const output of metadata.outputs) {
+            if (output.type !== "tensor(float)" ||
+                !output.shape.every(size => Number.isSafeInteger(size) && size > 0)) return null;
+            const length = output.shape.reduce((a, b) => a * b, 1);
+            // Refuse surprising model metadata rather than risking a large allocation.
+            if (!Number.isSafeInteger(length) || length > 16 * 1024 * 1024) return null;
+            outputs[output.name] = new Tensor("float32", new Float32Array(length), output.shape);
+        }
+        return Object.keys(outputs).length ? outputs : null;
+    }
+
+    /**
+     * React Native's ORT binding can write into output tensors supplied by the
+     * caller. Probe once per stream against ordinary inference on the same
+     * inputs; enable reuse only if every result is bit-for-bit equal and the
+     * binding returns our actual tensors. Some runtimes ignore preallocation.
+     */
+    private async runFrame(state: StreamState): Promise<Awaited<ReturnType<InferenceSession["run"]>>> {
+        if (!this.session) throw new Error("Session not initialized");
+        const session = this.session;
+        const outputs = state.reusableOutputs;
+        if (!outputs || state.outputReuse === "disabled") {
+            this.lastOutputBufferMode = "standard";
+            return session.run(state.feeds);
+        }
+        if (state.outputReuse === "probe") {
+            const standard = await session.run(state.feeds);
+            try {
+                const candidate = await session.run(state.feeds, outputs);
+                const supported = Object.keys(outputs).every(name => {
+                    if (candidate[name] !== outputs[name]) return false;
+                    const expected = standard[name]?.data;
+                    const actual = candidate[name]?.data;
+                    if (!(expected instanceof Float32Array) || !(actual instanceof Float32Array) ||
+                        expected.length !== actual.length) return false;
+                    const expectedBits = new Uint32Array(expected.buffer, expected.byteOffset, expected.length);
+                    const actualBits = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
+                    for (let i = 0; i < expectedBits.length; i++) {
+                        if (expectedBits[i] !== actualBits[i]) return false;
+                    }
+                    return true;
+                });
+                state.outputReuse = supported ? "enabled" : "disabled";
+            } catch {
+                state.outputReuse = "disabled";
+            }
+            if (state.outputReuse === "disabled") state.reusableOutputs = null;
+            this.lastOutputBufferMode = state.outputReuse === "enabled" ? "reuse" : "standard";
+            // Use the independently verified standard result for the probe frame.
+            return standard;
+        }
+        try {
+            const result = await session.run(state.feeds, outputs);
+            if (Object.keys(outputs).some(name => result[name] !== outputs[name])) {
+                // The run succeeded but the binding stopped honoring reuse.
+                state.outputReuse = "disabled";
+                state.reusableOutputs = null;
+            }
+            this.lastOutputBufferMode = state.outputReuse === "enabled" ? "reuse" : "standard";
+            return result;
+        } catch {
+            // Output buffers are distinct from inputs. A failed preallocated
+            // run cannot advance our recurrent state, so retry this frame once
+            // using the conventional API before surfacing any error.
+            state.outputReuse = "disabled";
+            state.reusableOutputs = null;
+            this.lastOutputBufferMode = "standard";
+            return session.run(state.feeds);
+        }
+    }
+
     public async processFrame(
         state: StreamState,
         frame: Float32Array,
@@ -173,7 +264,7 @@ export class DeepFilterNet {
     ): Promise<Float32Array> {
         if (!this.session) throw new Error("Session not initialized");
 
-        const { states, stateBuffers, attenLimDb, inputFrameData, inputFrame } = state;
+        const { stateBuffers, inputFrameData } = state;
         if (frame.length > this.hopSize) throw new Error("Denoiser input exceeds one frame");
         for (const sample of frame) {
             if (!Number.isFinite(sample)) throw new Error("Input audio contains a non-finite sample");
@@ -183,24 +274,7 @@ export class DeepFilterNet {
         inputFrameData.fill(0);
         inputFrameData.set(frame);
 
-        const feeds: Record<string, Tensor> = {
-            input_frame: inputFrame
-        };
-
-        if (this.inputNames.includes("atten_lim_db")) {
-            feeds["atten_lim_db"] = attenLimDb;
-        }
-
-        if (this.hasSingleStateTensor) {
-            feeds["states"] = states as Tensor;
-        } else {
-            const stateTensors = states as Tensor[];
-            for (let j = 0; j < stateTensors.length; j++) {
-                feeds[this.stateInputNames[j]] = stateTensors[j];
-            }
-        }
-
-        const results = await this.session.run(feeds);
+        const results = await this.runFrame(state);
 
         const outFrameRaw = results[this.outputNames[0]]?.data as Float32Array | undefined;
         if (!outFrameRaw || outFrameRaw.length !== this.hopSize) {
@@ -345,8 +419,8 @@ export class DeepFilterNet {
         for (let i = 0; i < audioFeeds.length; i++) {
             const feed = audioFeeds[i];
             const state = this.createStream(attenLimDbValue);
-            const aligned = new AlignedDenoiseStream(this.hopSize, this.delaySamples, frame =>
-                this.processFrame(state, frame));
+            const aligned = new AlignedDenoiseStream(this.hopSize, this.delaySamples, (frame, output) =>
+                this.processFrame(state, frame, output));
             const chunks: Float32Array[] = [];
             // Limit intermediate allocations for callers supplying long audio.
             const chunkSize = this.hopSize * 100;

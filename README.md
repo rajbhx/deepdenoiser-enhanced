@@ -1,6 +1,12 @@
-# DeepDenoiser Enhanced 2.0.2
+# DeepDenoiser Enhanced 2.0.3
 
 Offline AI audio and video denoising for Android using **DeepFilterNet3** and **ONNX Runtime**. This is a privacy-focused fork of [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser).
+
+## Product optimization (2.0.3 testing build)
+
+The streaming pipeline now reuses per-stream frame buffers, avoids copying full chunks, and uses smaller file-processing chunks. Model output tensors are reused only after an on-device equality/compatibility probe; unsupported providers fall back to ordinary outputs. Diagnostics reports which path the synthetic check used. A compatible patch addresses a malformed-URI decoder advisory and external paths are bounded. Exact audio framing, tails and recurrent state are regression-tested; no OnePlus speedup or battery improvement has yet been measured. See [performance and target-device validation](docs/PERFORMANCE.md) and [dependency security review](docs/SECURITY_REVIEW.md).
+
+This is still a **debug-signed test APK**, not a production release. Device/upgrade/privacy testing, owner-controlled release signing, model-weight terms and complete native notices remain open.
 
 ## Fixes in 2.0.1
 
@@ -64,7 +70,7 @@ To run the real-model regression separately on a compatible desktop:
 
 ```bash
 npm install --prefix /tmp/dd-ort --ignore-scripts --no-save --no-package-lock onnxruntime-node@1.24.3
-NODE_PATH=/tmp/dd-ort/node_modules node tests/real-model.test.cjs
+NODE_PATH=/tmp/dd-ort/node_modules npm run test:real-model
 ```
 
 ## Hardware notes
@@ -73,4 +79,4 @@ For OnePlus 7 / Snapdragon 855, try **Auto or XNNPACK**, **Auto/4 cores**, and *
 
 ## Credits and license
 
-Original app: [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser). This fork retains the repository's GPL-3.0 license. The installed npm dependency graph and available notice texts are shown in the app; regenerate with `node scripts/generate-notices.cjs` after a clean locked install. It is **not** a complete native/model license audit. The exact origin and license of the bundled model weights remain unverified, and native/Gradle notices require review before distribution. See [third-party release review](docs/THIRD_PARTY_REVIEW.md).
+Original app: [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser). This fork retains the repository's GPL-3.0 license. The installed npm dependency graph and available notice texts are shown in the app; regenerate with `node scripts/generate-notices.cjs` after a clean locked install. It is **not** a complete native/model license audit. The bundled model is byte-identical to the original app's first model commit, but the upstream weight source, conversion and license terms remain unverified, and native/Gradle notices require review before distribution. See [third-party release review](docs/THIRD_PARTY_REVIEW.md).

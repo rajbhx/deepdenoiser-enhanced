@@ -38,7 +38,7 @@ function tone(): Float32Array {
   return result;
 }
 
-async function modelRun(model: DeepFilterNet): Promise<{ elapsedMs: number; realtimeFactor: number; attemptedEngine: string }> {
+async function modelRun(model: DeepFilterNet): Promise<{ elapsedMs: number; realtimeFactor: number; attemptedEngine: string; outputBuffers: string }> {
   const signal = tone();
   const start = Date.now();
   const output = await model.denoise(signal);
@@ -46,7 +46,9 @@ async function modelRun(model: DeepFilterNet): Promise<{ elapsedMs: number; real
   if (!(output instanceof Float32Array) || output.length !== signal.length || !output.every(Number.isFinite)) {
     throw new Error("Model returned invalid synthetic audio");
   }
-  return { elapsedMs, realtimeFactor: (signal.length / 48000) / (elapsedMs / 1000), attemptedEngine: model.lastEngine };
+  const outputBuffers = model.lastOutputBufferMode === "reuse" ? "verified reuse" :
+    model.lastOutputBufferMode === "standard" ? "standard fallback" : "not reported";
+  return { elapsedMs, realtimeFactor: (signal.length / 48000) / (elapsedMs / 1000), attemptedEngine: model.lastEngine, outputBuffers };
 }
 
 /** Only files created by this test are removed. A collision is never overwritten. */
@@ -126,7 +128,7 @@ export async function runDiagnosticSelfCheck(): Promise<DiagnosticRunResult> {
       try {
         const result = await modelRun(await getDenoiser());
         attemptedEngine = result.attemptedEngine; realtimeFactor = result.realtimeFactor;
-        checks.push({ id: "model-run", label: "Synthetic model processing", status: "passed", detail: "The model returned the expected number of finite samples. This does not certify sound quality.", elapsedMs: result.elapsedMs });
+        checks.push({ id: "model-run", label: "Synthetic model processing", status: "passed", detail: `The model returned the expected number of finite samples. Output buffers: ${result.outputBuffers}. This does not certify sound quality.`, elapsedMs: result.elapsedMs });
         recordDiagnostic("diagnostics", "model", "OK", "info", result.elapsedMs);
       } catch (error) {
         recordDiagnosticError("diagnostics", "model", error);
@@ -148,7 +150,7 @@ export async function benchmarkDiagnosticProvider(mode: Extract<RuntimeMode, "cp
       if (model.sha256 !== MODEL_SHA256) throw new Error("Bundled model integrity failed");
       const result = await withDiagnosticModel(mode, modelRun);
       recordDiagnostic("diagnostics", "model", "OK", "info", result.elapsedMs);
-      return { checks: [{ id: "benchmark", label: `${mode.toUpperCase()} short test`, status: "passed", detail: "The attempted provider may have fallen back; this short timing is indicative only.", elapsedMs: result.elapsedMs }], attemptedEngine: result.attemptedEngine, realtimeFactor: result.realtimeFactor };
+      return { checks: [{ id: "benchmark", label: `${mode.toUpperCase()} short test`, status: "passed", detail: `Output buffers: ${result.outputBuffers}. The attempted provider may have fallen back; this short timing is indicative only.`, elapsedMs: result.elapsedMs }], attemptedEngine: result.attemptedEngine, realtimeFactor: result.realtimeFactor };
     } catch (error) {
       recordDiagnosticError("diagnostics", "model", error);
       return { checks: [{ id: "benchmark", label: `${mode.toUpperCase()} short test`, status: "failed", detail: "This provider test did not complete. No saved runtime setting was changed." }], attemptedEngine: null, realtimeFactor: null };

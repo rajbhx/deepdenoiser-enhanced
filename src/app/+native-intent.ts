@@ -1,3 +1,7 @@
+// Keep externally supplied route strings bounded before router query parsing.
+// Share payloads live in the native queue and are not parsed from this path.
+export const MAX_EXTERNAL_PATH_LENGTH = 16 * 1024;
+
 export function redirectSystemPath({
     path,
     initial,
@@ -6,16 +10,18 @@ export function redirectSystemPath({
     initial: boolean;
 }) {
     try {
-        // Check if the incoming path is from expo-sharing
-        // This can be via a custom scheme like expo-sharing:// or a deep link
-        if (path.includes("expo-sharing")) {
+        // Share data is obtained from our bounded native queue, not from the
+        // redirect URL; map it directly without decoding arbitrary query text.
+        if (typeof path === "string" && path.includes("expo-sharing")) {
             return "/share-handler";
         }
-
-        // Default path handling
+        // A malicious external deep link should not consume unbounded parser
+        // work or prevent the app from opening.
+        if (typeof path !== "string" || path.length > MAX_EXTERNAL_PATH_LENGTH) {
+            return "/(tabs)";
+        }
         return path;
     } catch {
-        // If everything fails, fallback to home
         return "/(tabs)";
     }
 }
