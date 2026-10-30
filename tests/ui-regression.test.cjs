@@ -84,7 +84,9 @@ const mocks={
   '@/src/scripts/recordingSafety':nativeSafety,'@/src/scripts/recordingRecovery':{repairRecordingCopy:(...args)=>S.repairRecordingCopy(...args)},'@/src/scripts/denoiseCache':cacheMock,
   '@/src/scripts/alignedDenoiseStream':{AlignedDenoiseStream:class{async push(v){return v}async finish(){return new Float32Array()}}},
   '@/src/scripts/analytics':{trackAppEvent(){},trackAppError(){}},
-  '@/src/scripts/diagnostics':{recordDiagnostic(){},recordDiagnosticError(){}},
+  '@/src/scripts/diagnostics':{recordDiagnostic(){},recordDiagnosticError(){},createRecordingStopDiagnostics(){
+    let stage=null;return {enter(value){stage=value;S.stopPhases.push(['enter',value])},finish(){S.stopPhases.push(['finish',stage]);stage=null},fail(){S.stopPhases.push(['fail',stage]);stage=null}};
+  }},
   '@/src/scripts/silenceTrim':{DEFAULT_SILENCE_TRIM:{enabled:false,mode:'auto',thresholdDb:-40,minSilenceMs:500}},
   '@/src/scripts/formatHandler':{PCMtoWav:async()=>({file:new FakeFile('file:///cache/partial.wav')}),writePCMChunk:(...args)=>S.writePCMChunk(...args),saveToDevice:()=>S.save(),savedMediaLocation:()=> 'Music/DeepDenoiser Audio'},
   '@/src/scripts/processMedia':{processMedia:(...args)=>S.processMedia(...args)},
@@ -98,7 +100,7 @@ const mocks={
 const oldLoad=Module._load;
 Module._load=function(request,parent,isMain){if(Object.hasOwn(mocks,request))return mocks[request];if(request.startsWith('@/'))return oldLoad.call(this,path.join(root,request.slice(2)),parent,isMain);return oldLoad.call(this,request,parent,isMain)};
 function reset(){
-  Object.assign(S,{alerts:[],routes:[],files:new Map(),kinds:new Map(),imports:[],params:{},prevent:null,audioStatus:{},players:{},videos:{},plays:0,seeks:[],retries:0,began:0,ended:0,statusChecks:0,nativeIdle:true,nativeStatus:null,invalidRecording:false,headerMismatch:false,damagedImport:false,privateMedia:[],streamStrength:null,focused:true,processingBusy:false});
+  Object.assign(S,{alerts:[],routes:[],files:new Map(),kinds:new Map(),imports:[],params:{},prevent:null,audioStatus:{},players:{},videos:{},plays:0,seeks:[],retries:0,began:0,ended:0,statusChecks:0,nativeIdle:true,nativeStatus:null,invalidRecording:false,headerMismatch:false,damagedImport:false,privateMedia:[],streamStrength:null,focused:true,processingBusy:false,stopPhases:[]});
   S.getSettings=async()=>defaultSettings();S.updateSettings=async patch=>({...defaultSettings(),...patch});S.getDenoiser=async()=>denoiser;
   S.urls=[];S.sharedUris=[];S.openURL=async url=>{S.urls.push(url)};
   S.repairRecordingCopy=async()=>new FakeFile('file:///doc/denoised/recovered.wav');
@@ -203,6 +205,7 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   await click(byLabel(tree,'Start recording'));assert.equal(S.streamStrength,20);
   const originalBackup=[...S.files.keys()].find(x=>/orig_\d+\.pcm$/.test(x));assert.ok(originalBackup);S.files.get(originalBackup).size=10;
   S.nativeStop=async()=>{throw new Error('Stop rejected')};await click(byLabel(tree,'Stop and save recording'));
+  assert.deepEqual(S.stopPhases,[['enter','record-stop-native'],['fail','record-stop-native']]);
   assert.equal(S.prevent.active,true);assert.ok(buttonByText(tree,'Check recorder status'));
   await click(buttonByText(tree,'Check recorder status'));assert.ok(S.alerts.some(x=>x[0]==='Recorder status is still uncertain'));assert.equal(S.prevent.active,true);
   S.nativeIdle=true;await click(buttonByText(tree,'Check recorder status'));assert.equal(S.prevent.active,false);assert.ok(S.files.has(originalBackup));assert.ok(S.files.has('file:///doc/recordings/test.wav'));
@@ -317,16 +320,21 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   await act(async()=>{await stageConfig.onAudioStream({data:new Float32Array(100)})});
   await act(async()=>{void byLabel(tree,'Stop and save recording').props.onPress();await Promise.resolve()});
   assert.match(allText(tree.root),/Stopping microphone and closing recorder/);assert.equal(S.prevent.active,true);
+  assert.deepEqual(S.stopPhases,[['enter','record-stop-native']]);
   await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Stopping microphone/);
   assert.equal(byLabel(tree,'Go back').props.disabled,true);
   S.nativeIdle=true;await act(async()=>stopStage.resolve({fileUri:'file:///doc/recordings/test.wav'}));
   assert.match(allText(tree.root),/Finishing queued live audio/);assert.equal(S.prevent.active,true);
+  assert.deepEqual(S.stopPhases.at(-1),['enter','record-stop-drain']);
   await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Finishing queued live audio/);
   await act(async()=>queueStage.resolve());assert.match(allText(tree.root),/Checking recorded samples and finishing missing audio/);
+  assert.deepEqual(S.stopPhases.slice(-2),[['enter','record-stop-original'],['enter','record-stop-reconcile']]);
   await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Checking recorded samples/);
   await act(async()=>compareStage.resolve(false));assert.match(allText(tree.root),/Denoising complete recording/);
+  assert.deepEqual(S.stopPhases.at(-1),['enter','record-stop-reprocess']);
   await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Denoising complete recording/);
   await act(async()=>processStage.resolve({file:new FakeFile('file:///doc/denoised/out.wav')}));
+  assert.deepEqual(S.stopPhases.at(-1),['finish','record-stop-reprocess']);
   assert.equal(S.prevent.active,false);assert.equal(byLabel(tree,'Go back').props.disabled,false);await unmount(tree);
   console.log('PASS host Back guard and stage labels track delayed Stop, queue, reconciliation and full processing');
 

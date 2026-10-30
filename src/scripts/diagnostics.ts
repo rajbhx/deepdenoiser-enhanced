@@ -2,6 +2,7 @@ import { deleteDiagnosticHistory, readDiagnosticHistory, writeDiagnosticHistory 
 import {
   classifyDiagnosticError, MAX_DIAGNOSTIC_EVENTS, parseHistory, safeEvent,
   type DiagnosticCode, type DiagnosticDomain, type DiagnosticEvent, type DiagnosticLevel, type DiagnosticStage,
+  type RecordingStopStage,
 } from "./diagnosticsCore";
 
 export type DiagnosticSnapshot = {
@@ -91,6 +92,41 @@ export function recordDiagnosticError(domain: DiagnosticDomain, stage: Diagnosti
     const code = classifyDiagnosticError(error, domain);
     recordDiagnostic(domain, stage, code, code === "CANCELLED" ? "info" : "error");
   } catch { /* no arbitrary exception content is saved */ }
+}
+
+/**
+ * A Stop operation can be waiting in native shutdown, queue drain, original
+ * validation, reconciliation or output work. These allowlisted checkpoints
+ * help distinguish those phases without recording file details or raw errors.
+ * Persistence remains opt-in and writes are best effort; an unfinished START
+ * is a clue, not proof of an ANR or its cause.
+ */
+export function createRecordingStopDiagnostics() {
+  let current: RecordingStopStage | null = null;
+  let startedAt = 0;
+  const finish = () => {
+    if (!current) return;
+    const stage = current;
+    current = null;
+    recordDiagnostic("record", stage, "OK", "info", Date.now() - startedAt);
+  };
+  return {
+    enter(stage: RecordingStopStage): void {
+      try {
+        finish();
+        current = stage;
+        startedAt = Date.now();
+        recordDiagnostic("record", stage, "START");
+      } catch { /* diagnostics must not affect recording */ }
+    },
+    finish(): void { try { finish(); } catch { /* best effort */ } },
+    fail(error: unknown): void {
+      try {
+        if (current) recordDiagnosticError("record", current, error);
+        current = null;
+      } catch { /* no raw exception or media details are saved */ }
+    },
+  };
 }
 
 /** Explicit user action only. History remains local and is never uploaded. */

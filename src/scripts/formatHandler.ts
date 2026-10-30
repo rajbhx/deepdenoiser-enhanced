@@ -56,24 +56,20 @@ export async function decodeToPCMFile(
   file: fs.File,
   outputUri?: string,
 ): Promise<{ file: fs.File; sampleRate: number }> {
+  // Both attempts use the same staged path, so a failed first attempt cannot
+  // leave an additional, differently named partial PCM behind on fallback.
+  const outputFile = outputUri
+    ? new fs.File(outputUri)
+    : new fs.File(fs.Paths.cache, `denoised_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.pcm`);
   try {
-    const outputFile = outputUri
-      ? new fs.File(outputUri)
-      : new fs.File(fs.Paths.cache, `denoised_${Date.now()}.pcm`);
-    const result = await decodeToPCM(
-      file.uri,
-      outputFile.uri,
-    );
+    const result = await decodeToPCM(file.uri, outputFile.uri);
     return { file: outputFile, sampleRate: result.sampleRate };
   } catch (error) {
     // MediaExtractor can fail to parse WAV files on some devices.
     // Fall back to direct RIFF/WAVE parsing for .wav files.
     if (/\.wav(\?|#|$)/i.test(file.uri)) {
       try {
-        console.warn("MediaExtractor failed on WAV, trying direct extraction:", file.uri);
-        const outputFile = outputUri
-          ? new fs.File(outputUri)
-          : new fs.File(fs.Paths.cache, `denoised_${Date.now()}.pcm`);
+        console.warn("Media decoder failed on WAV; trying direct extraction.");
         const result = await extractWavAudio(file.uri, outputFile.uri);
         return { file: outputFile, sampleRate: result.sampleRate };
       } catch (wavError) {

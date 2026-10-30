@@ -102,6 +102,19 @@ jobs:
       - name: Non-overwriting promotion and trim-edge regression (actual Java implementation)
         run: bun run test:jvm-safety
 
+      - name: WAV fallback, decoder cleanup and recorder Kotlin regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          KOTLIN_ZIP="$RUNNER_TEMP/kotlin-compiler-2.2.20.zip"
+          curl -fL --retry 3 -o "$KOTLIN_ZIP" https://github.com/JetBrains/kotlin/releases/download/v2.2.20/kotlin-compiler-2.2.20.zip
+          echo "81f0264c9073b5cbbdb3ff8418cf2c5dac076879fc156fa1a6462f5a5acc4420  $KOTLIN_ZIP" | sha256sum --check
+          unzip -q "$KOTLIN_ZIP" -d "$RUNNER_TEMP/dd-kotlin"
+          export KOTLINC="$RUNNER_TEMP/dd-kotlin/kotlinc/bin/kotlinc"
+          bun run test:media-native
+          bun run test:trim-dispatch
+          bun run test:worker-failure
+
       - name: Native incoming-share FIFO regression (actual JVM implementation)
         run: |
           mkdir -p "$RUNNER_TEMP/dd-share"

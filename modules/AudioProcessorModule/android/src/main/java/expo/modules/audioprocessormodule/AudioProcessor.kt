@@ -558,6 +558,7 @@ class MediaProcessor(private val context: Context) : Closeable {
                 var outputStream: OutputStream? = null
                 var isCodecStarted = false
                 var sampleRate = 48000
+                var primaryFailure: Throwable? = null
 
                 try {
                     extractor = MediaExtractor()
@@ -673,20 +674,38 @@ class MediaProcessor(private val context: Context) : Closeable {
                     outputStream?.flush()
                     outputStream?.close()
                     outputStream = null
+                } catch (failure: Throwable) {
+                    primaryFailure = failure
+                    throw failure
                 } finally {
+                    // A dead media service can make release fail. Still attempt
+                    // all remaining releases and preserve the original decode
+                    // failure rather than replacing it with a cleanup failure.
+                    var cleanupFailure: Throwable? = null
+                    fun rememberCleanupFailure(failure: Throwable) {
+                        // Never create a self-suppression or cycle if a provider
+                        // happens to rethrow the original exception instance.
+                        if (failure === primaryFailure) return
+                        val first = cleanupFailure
+                        if (first == null) cleanupFailure = failure
+                        else if (first !== failure) first.addSuppressed(failure)
+                    }
                     if (isCodecStarted) {
                         try {
                             codec?.stop()
-                        } catch (e: Exception) {
-                            // Log or ignore
+                        } catch (_: Exception) {
+                            // A codec in an error state may already be stopped.
+                        } catch (failure: Throwable) {
+                            rememberCleanupFailure(failure)
                         }
                     }
-                    codec?.release()
-                    extractor?.release()
-                    try {
-                        outputStream?.close()
-                    } catch (e: Exception) {
-                        // Ignore
+                    try { codec?.release() } catch (failure: Throwable) { rememberCleanupFailure(failure) }
+                    try { extractor?.release() } catch (failure: Throwable) { rememberCleanupFailure(failure) }
+                    try { outputStream?.close() } catch (failure: Throwable) { rememberCleanupFailure(failure) }
+                    cleanupFailure?.let { failure ->
+                        val original = primaryFailure
+                        if (original == null) throw failure
+                        if (original !== failure) original.addSuppressed(failure)
                     }
                 }
                 mapOf("path" to outputPath, "sampleRate" to sampleRate)
@@ -1323,6 +1342,9 @@ class MediaProcessor(private val context: Context) : Closeable {
         outputStream: OutputStream,
         inputPath: String
     ) {
+        // The caller supplies at most one bounded input block. Write its mono
+        // output together rather than making two file writes per audio sample.
+        val monoBlock = ByteArray(frames * 2)
         for (f in 0 until frames) {
             val offset = f * frameSize
             var sum = 0L
@@ -1330,7 +1352,8 @@ class MediaProcessor(private val context: Context) : Closeable {
                 val sampleOffset = offset + c * bytesPerSample
                 val sample = when {
                     bitDepth <= 8 -> ((buffer[sampleOffset].toInt() and 0xFF) - 128L) shl 8
-                    bitDepth <= 16 -> readInt16LE(buffer, sampleOffset).toLong()
+                    // Header fields are unsigned, but PCM16 samples are signed.
+                    bitDepth <= 16 -> readInt16LE(buffer, sampleOffset).toShort().toLong()
                     bitDepth <= 24 -> {
                         val v = (buffer[sampleOffset].toInt() and 0xFF) or
                                 ((buffer[sampleOffset + 1].toInt() and 0xFF) shl 8) or
@@ -1351,9 +1374,10 @@ class MediaProcessor(private val context: Context) : Closeable {
             val mono = (sum / channels)
                 .coerceIn(Short.MIN_VALUE.toLong(), Short.MAX_VALUE.toLong())
                 .toShort()
-            outputStream.write(mono.toInt() and 0xFF)
-            outputStream.write((mono.toInt() shr 8) and 0xFF)
+            monoBlock[f * 2] = mono.toByte()
+            monoBlock[f * 2 + 1] = (mono.toInt() shr 8).toByte()
         }
+        outputStream.write(monoBlock)
     }
 
     private fun readFully(stream: InputStream, buffer: ByteArray) {

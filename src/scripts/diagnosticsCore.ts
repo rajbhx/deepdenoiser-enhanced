@@ -4,13 +4,18 @@
  * media hashes or arbitrary context strings.
  */
 export const DOMAINS = ["app", "ui", "import", "share", "process", "record", "export", "diagnostics", "model"] as const;
-export const STAGES = ["general", "prepare", "cache", "decode", "analyze", "model", "denoise", "finalize", "mux", "import", "share", "record-start", "record-stop", "export", "self-check", "storage"] as const;
+export const RECORD_STOP_STAGES = [
+  "record-stop-native", "record-stop-drain", "record-stop-original", "record-stop-reconcile",
+  "record-stop-wrap", "record-stop-save", "record-stop-reprocess",
+] as const;
+export const STAGES = ["general", "prepare", "cache", "decode", "analyze", "model", "denoise", "finalize", "mux", "import", "share", "record-start", "record-stop", ...RECORD_STOP_STAGES, "export", "self-check", "storage"] as const;
 export const CODES = ["START", "OK", "FAIL_MEMORY", "FAIL_STORAGE", "FAIL_PERMISSION", "FAIL_DECODE", "FAIL_MODEL", "FAIL_INTEGRITY", "FAIL_IO", "FAIL_RECORDER", "FAIL_UNKNOWN", "CANCELLED", "INTERRUPTED"] as const;
 export const LEVELS = ["info", "warning", "error"] as const;
 export const MAX_DIAGNOSTIC_EVENTS = 50;
 
 export type DiagnosticDomain = typeof DOMAINS[number];
 export type DiagnosticStage = typeof STAGES[number];
+export type RecordingStopStage = typeof RECORD_STOP_STAGES[number];
 export type DiagnosticCode = typeof CODES[number];
 export type DiagnosticLevel = typeof LEVELS[number];
 export type DiagnosticEvent = {

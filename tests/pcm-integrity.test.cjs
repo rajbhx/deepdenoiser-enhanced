@@ -18,6 +18,7 @@ class File {
   }}
 }
 let mode='valid', lastOutput='';
+let decodeFails=false, fallbackFails=false, primaryPath='', fallbackPath='', fallbackCalls=0;
 function header(dataLength, rate=48000) {
   const b=Buffer.alloc(44);b.write('RIFF',0);b.writeUInt32LE(dataLength+36,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);
   b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(rate,24);b.writeUInt32LE(rate*2,28);
@@ -31,6 +32,14 @@ const native={pcmToWav:async(input,output,rate)=>{
   fs.writeFileSync(output,wav);
   if(mode==='throws') throw Error('simulated disk full');
   return {trimStartUs:0,trimEndUs:100,trimmed:false};
+}, decodeToPCM:async(_input,output)=>{
+  primaryPath=output;fs.writeFileSync(output,decodeFails?'partial':'decoded');
+  if(decodeFails)throw Error('synthetic media decoder failure');
+  return {sampleRate:48000};
+}, extractWavAudio:async(_input,output)=>{
+  fallbackCalls++;fallbackPath=output;fs.writeFileSync(output,fallbackFails?'partial fallback':'direct');
+  if(fallbackFails)throw Error('synthetic direct WAV failure');
+  return {sampleRate:44100};
 }};
 const filename=path.join(__dirname,'../src/scripts/formatHandler.ts');
 const js=ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
@@ -39,7 +48,7 @@ const stubs={'@/modules/AudioProcessorModule':native,'expo-file-system':{File,Pa
   'react-native':{Platform:{OS:'android',Version:36}},'./analytics':{},'./silenceTrim':{},'./resampler':{}};
 mod.require=function(request){return Object.hasOwn(stubs,request)?stubs[request]:Module.prototype.require.call(this,request)};
 mod._compile(js,filename);
-const {readPCMChunks,PCMtoArray,PCMtoWav}=mod.exports;
+const {readPCMChunks,PCMtoArray,PCMtoWav,decodeToPCMFile}=mod.exports;
 function synthetic(bytes, reported, maxRead, changeSizeAfterRead=false) {
   let closed=false,reads=0,pos=0;
   return {exists:true,size:reported,get closed(){return closed},open(){return {
@@ -49,6 +58,30 @@ function synthetic(bytes, reported, maxRead, changeSizeAfterRead=false) {
   }}};
 }
 (async()=>{
+  const source=new File(work,'private-recording.wav');fs.writeFileSync(source.uri,'original');
+  const dest=new File(work,'caller-owned.pcm');
+  let result=await decodeToPCMFile(source,dest.uri);
+  assert.equal(result.sampleRate,48000);assert.equal(result.file.uri,dest.uri);assert.equal(fallbackCalls,0);
+  assert.equal(fs.readFileSync(dest.uri,'utf8'),'decoded');
+  decodeFails=true;
+  const oldWarn=console.warn, warnings=[];console.warn=(...args)=>warnings.push(args.map(String).join(' '));
+  try {
+    result=await decodeToPCMFile(source,dest.uri);
+    assert.equal(result.sampleRate,44100);assert.equal(primaryPath,dest.uri);assert.equal(fallbackPath,dest.uri);
+    assert.equal(fs.readFileSync(dest.uri,'utf8'),'direct');assert.equal(fs.readFileSync(source.uri,'utf8'),'original');
+    result=await decodeToPCMFile(source);
+    assert.equal(primaryPath,fallbackPath,'default fallback must reuse the first staged path');
+    assert.equal(result.file.uri,primaryPath);assert.equal(fs.readFileSync(source.uri,'utf8'),'original');
+    fallbackFails=true;
+    await assert.rejects(()=>decodeToPCMFile(source,dest.uri),/synthetic direct WAV failure/);
+    const notWav=new File(work,'other.mp3');fs.writeFileSync(notWav.uri,'original mp3');const callsBefore=fallbackCalls;
+    await assert.rejects(()=>decodeToPCMFile(notWav,dest.uri),/synthetic media decoder failure/);
+    assert.equal(fallbackCalls,callsBefore,'non-WAV failures never enter the WAV parser');
+    assert.equal(fs.readFileSync(notWav.uri,'utf8'),'original mp3');
+  } finally {console.warn=oldWarn;decodeFails=false;fallbackFails=false}
+  assert.ok(warnings.length>=2 && warnings.every(line=>!line.includes(source.uri) && !line.includes('private-recording')),'warnings do not log a media URI or filename');
+  console.log('PASS decoder fallback reuses one staged path, preserves originals, limits WAV retry and omits media paths from warnings');
+
   const data=Uint8Array.from([0,0,1,0,255,127,0,128]);
   const partial=synthetic(data,8,3);const values=[];
   await readPCMChunks(partial,4,async chunk=>values.push(...chunk));

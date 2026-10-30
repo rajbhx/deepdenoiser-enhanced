@@ -14,7 +14,7 @@ import { AlignedDenoiseStream } from "@/src/scripts/alignedDenoiseStream";
 import { assertNativeRecorderIdle, BoundedRecordingQueue, ensureRecordingWavHeader, isRecordingFailureEvent, isRecordingWorkerFailed, reconcileRecording, RecordingHeaderMismatchError, recordingsDir, type RecordingQueueIssue } from "@/src/scripts/recordingSafety";
 import { processMedia } from "@/src/scripts/processMedia";
 import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
-import { recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
+import { createRecordingStopDiagnostics, recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
 import { PCMtoWav, writePCMChunk } from "@/src/scripts/formatHandler";
 import {
   ATTEN_PRESET_DB,
@@ -403,11 +403,13 @@ export default function RecordingScreen() {
     if (isStoppingRef.current) return;
     isStoppingRef.current = true;
     recordDiagnostic("record", "record-stop", "START");
+    const stopDiagnostics = createRecordingStopDiagnostics();
     let savedOriginal: fs.File | null = null;
     let nativeStopped = false;
     try {
       setIsFinalizing(true);
       setFinalizingText("Stopping microphone and closing recorder…");
+      stopDiagnostics.enter("record-stop-native");
       // Do not disable callbacks before native Stop: its final event can race
       // this promise. The WAV reconciliation below also covers late callbacks.
       const stopped = await stopAudioRecording();
@@ -419,8 +421,10 @@ export default function RecordingScreen() {
       acceptingStreamRef.current = false;
       const queue = queueRef.current;
       setFinalizingText("Finishing queued live audio…");
+      stopDiagnostics.enter("record-stop-drain");
       if (queue) await queue.drain();
       setFinalizingText("Checking the original recording…");
+      stopDiagnostics.enter("record-stop-original");
       const nativeWav = stopped?.fileUri ? new fs.File(stopped.fileUri) : nativeRecordingRef.current;
       if (!nativeWav?.exists || nativeWav.size <= 44) throw new Error("No audio was recorded. Please try again.");
       const totalBytes = ensureRecordingWavHeader(nativeWav);
@@ -435,6 +439,7 @@ export default function RecordingScreen() {
       if (queue && !queue.error && origPcm && denPcm && aligned) {
         try {
           setFinalizingText("Checking recorded samples and finishing missing audio…");
+          stopDiagnostics.enter("record-stop-reconcile");
           matches = await reconcileRecording(nativeWav, origPcm, async samples => {
             const cleaned = await aligned.push(samples);
             if (cleaned.length) await writePCMChunk(denPcm, cleaned, true);
@@ -446,21 +451,25 @@ export default function RecordingScreen() {
             if (denPcm.size !== totalBytes) throw new Error("Cleaned recording length does not match the original");
           }
         } catch (error) {
-          console.warn("Live recording could not be reconciled; processing complete original:", error);
+          stopDiagnostics.fail(error);
+          console.warn("Live recording could not be reconciled; processing complete original.");
           matches = false;
         }
       }
       let savedDenoised: fs.File;
       if (matches && denPcm) {
         setFinalizingText("Preparing cleaned WAV…");
+        stopDiagnostics.enter("record-stop-wrap");
         const denWavResult = await PCMtoWav(denPcm, SAMPLE_RATE,
           silenceTrim.enabled ? silenceTrim : undefined);
         setFinalizingText("Saving cleaned WAV…");
+        stopDiagnostics.enter("record-stop-save");
         savedDenoised = await placeOutput(denWavResult.file, `recording_${Date.now()}_cleaned.wav`);
       } else {
         // A stream error or non-prefix gap must never silently corrupt output.
         // Reprocess the complete native recording instead.
         setFinalizingText("Denoising complete recording...");
+        stopDiagnostics.enter("record-stop-reprocess");
         const result = await processMedia(nativeWav, nativeWav.name, false, {
           attenLimDb,
           normalize: { toggle: false, targetRMS: -14, maxPeakDb: -1 },
@@ -469,8 +478,10 @@ export default function RecordingScreen() {
         savedDenoised = result.file;
       }
       setFinalDenoisedWav(savedDenoised);
+      stopDiagnostics.finish();
       recordDiagnostic("record", "record-stop", "OK");
     } catch (error) {
+      stopDiagnostics.fail(error);
       recordDiagnosticError("record", "record-stop", error);
       acceptingStreamRef.current = false;
       setFinalizingText("Finishing queued audio for recovery…");

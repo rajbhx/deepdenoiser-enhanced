@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit",
     "test:real-model": "node tests/real-model.test.cjs && node tests/real-preallocation.test.cjs",
     "test:jvm-safety": "node scripts/test-jvm-safety.cjs",
+    "test:media-native": "node tests/wav-fallback-jvm.test.cjs && node tests/wav-parser-jvm.test.cjs && node tests/decoder-cleanup-jvm.test.cjs",
     "test:trim-dispatch": "node tests/trim-dispatch.test.cjs",
     "test:worker-failure": "node tests/worker-failure-jvm.test.cjs",
     "test:document-picker": "node tests/documentPicker.test.cjs",

@@ -17,8 +17,8 @@ const MAX_CACHED_DECODES = 5;
 const MAX_CACHED_DENOISES = 8;
 // Each rebuildable PCM group is limited separately. Durable files are never pruned.
 const MAX_PCM_STAGE_BYTES = 512 * 1024 * 1024;
-/** Bump when the model, input framing or resampler changes. */
-const PIPELINE_VERSION = "dfn3-v4-verified-pcm";
+/** Bump when decoded samples, the model, input framing or resampler changes. */
+const PIPELINE_VERSION = "dfn3-v5-signed-wav";
 
 interface CacheEntry { path: string; createdAt: number; bytes?: number; sha256?: string }
 interface DecodeEntry extends CacheEntry { sampleRate: number }
@@ -386,7 +386,10 @@ export function buildCacheKey(
 }
 
 export function buildDecodeKey(input: fs.File): string {
-  return ["dec-v3-full-eos", buildInputIdentity(input)].join("|");
+  // Older direct-WAV fallback decodes could contain unsigned PCM16 samples.
+  // The index did not record which decoder was used, so miss old PCM entries
+  // rather than risk reusing damaged data. Durable user outputs are untouched.
+  return ["dec-v4-signed-wav", buildInputIdentity(input)].join("|");
 }
 
 export function buildDenoiseKey(

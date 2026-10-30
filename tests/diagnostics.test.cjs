@@ -49,6 +49,28 @@ const pause = ms=>new Promise(resolve=>setTimeout(resolve,ms));
   diag.recordDiagnosticError('record','record-stop',new Error(`Recorder stopped ${privateText}`));
   await diag.clearDiagnosticHistory(); assert.equal(diag.getDiagnosticSnapshot().events.length,0);
   assert.deepEqual(JSON.parse(writes.at(-1)).events,[],'clear persisted ring without deleting media');
+
+  const realNow=Date.now;let now=1000;Date.now=()=>now;
+  try {
+    const trace=diag.createRecordingStopDiagnostics();
+    trace.enter('record-stop-native');now+=1500;
+    trace.enter('record-stop-drain');now+=200;
+    trace.fail(new Error(`Recorder stopped ${privateText}`));
+    trace.enter('record-stop-reprocess');now+=2500;trace.finish();trace.finish();
+    const events=diag.getDiagnosticSnapshot().events;
+    assert.deepEqual(events.map(({stage,code,elapsedMs})=>[stage,code,elapsedMs]),[
+      ['record-stop-native','START',undefined],['record-stop-native','OK',1500],
+      ['record-stop-drain','START',undefined],['record-stop-drain','FAIL_RECORDER',undefined],
+      ['record-stop-reprocess','START',undefined],['record-stop-reprocess','OK',2500],
+    ]);
+    assert.ok(!JSON.stringify(events).includes('secret-voice'));
+  } finally {Date.now=realNow}
+  await pause(900);
+  const savedTrace=JSON.parse(writes.at(-1));
+  assert.equal(savedTrace.events.at(-1).stage,'record-stop-reprocess');
+  assert.ok(!JSON.stringify(savedTrace).includes('secret-voice') && !JSON.stringify(savedTrace).includes('alice@example.com'));
+  console.log('PASS opt-in Stop checkpoints record ordered phases, bounded elapsed times and sanitized failures without media details');
+
   diag.recordDiagnostic('process','decode','START');
   await diag.setDiagnosticPersistence(false);
   const afterDisable = writes.length; await pause(900);

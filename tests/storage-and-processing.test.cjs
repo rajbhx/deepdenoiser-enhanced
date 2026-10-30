@@ -134,6 +134,29 @@ const cacheApi = load('denoiseCache', {
   assert.equal(await cacheApi.lookupCachedOutput('malformed','audio'),null);assert.equal(await cacheApi.lookupCachedOutput('outside','audio'),null);assert.ok(a.exists&&out1.exists);
   console.log('PASS output cache is kind-aware and safely rejects mismatched or corrupt references');
 
+  // The old WAV fallback could have produced clipped negative samples. Its
+  // indexes do not say which decoder was used, so all old decode, denoise and
+  // output keys must miss without touching any durable output or original.
+  const identity=cacheApi.buildInputIdentity(first);
+  const oldDec=['dec-v3-full-eos',identity].join('|'), newDec=cacheApi.buildDecodeKey(first);
+  const newDn=cacheApi.buildDenoiseKey(first,keySettings), oldDn=newDn.replace('dfn3-v5-signed-wav','dfn3-v4-verified-pcm');
+  const oldOut=audioKey.replace('dfn3-v5-signed-wav','dfn3-v4-verified-pcm');
+  assert.notEqual(newDec,oldDec);assert.notEqual(newDn,oldDn);assert.notEqual(audioKey,oldOut);
+  const previousDecode=new File(cache,'stage_dec_100_a.pcm'), previousDenoise=new File(cache,'stage_dn_100_b.pcm');
+  await previousDecode.write('old!');await previousDenoise.write('old?');
+  await cacheApi.storeDecodedPCM(oldDec,previousDecode,48000);
+  await cacheApi.storeDenoisedPCM(oldDn,previousDenoise);
+  await cacheApi.storeCachedOutput(oldOut,out1);
+  assert.ok(await cacheApi.lookupDecodedPCM(oldDec));assert.ok(await cacheApi.lookupDenoisedPCM(oldDn));
+  assert.ok(await cacheApi.lookupCachedOutput(oldOut,'audio'));
+  assert.equal(await cacheApi.lookupDecodedPCM(newDec),null);
+  assert.equal(await cacheApi.lookupDenoisedPCM(newDn),null);
+  assert.equal(await cacheApi.lookupCachedOutput(audioKey,'audio'),null);
+  assert.ok(first.exists && out1.exists && previousDecode.exists && previousDenoise.exists);
+  await cacheApi.clearRebuildableCache(()=>{});
+  assert.ok(first.exists && out1.exists,'cache invalidation/clearing never deletes originals or finished media');
+  console.log('PASS potentially affected old cache keys are not reused and durable originals and results remain');
+
   const decoded=new File(cache,'stage_dec_123_a1.pcm'), cleaned=new File(cache,'stage_dn_456_b2.pcm');
   const emergency=new File(cache,'orig_123.pcm'), impostor=new File(doc,'stage_dec_789_c3.pcm');
   await decoded.write('decode');await cleaned.write('clean!');await emergency.write('original');await impostor.write('not-cache');
