@@ -13,6 +13,13 @@ assert.equal(decode('caf%C3%A9'), 'café');
 assert.equal(decode('%FE%FF'), '\uFFFD\uFFFD');
 assert.equal(decode('%C2'), '\uFFFD');
 assert.equal(decode('%C3%A9%ZZ'), 'é%ZZ');
+assert.equal(decode('%24%26%ZZ'), '$&%ZZ', 'decoded dollar sequences are not replacement patterns');
+assert.equal(decode('%24%60%ZZ'), '$`%ZZ');
+assert.equal(decode('%24%24%ZZ'), '$$%ZZ');
+assert.equal(decode('%2B+%ZZ'), '+ %ZZ', 'encoded plus survives, literal plus becomes space');
+assert.equal(decode('%E0%80%AF'), '%E0%80%AF', 'overlong UTF-8 stays literal');
+assert.equal(decode('%F0%9F%98%80%ZZ'), '😀%ZZ');
+assert.equal(decode('%FF%FE%ZZ'), '\uFFFD\uFFFD%ZZ');
 assert.throws(() => decode(null), TypeError);
 assert.deepEqual({...query.parse('name=hello+world&symbol=%E2%82%B9')}, {name:'hello world', symbol:'₹'});
 // Run a known pathological malformed percent sequence with a generous process
@@ -24,6 +31,19 @@ const child = spawnSync(process.execPath, ['-e', `
 `], {timeout: 5000, encoding: 'utf8'});
 assert.equal(child.error, undefined, `malformed percent decode timed out: ${child.error}`);
 assert.equal(child.status, 0, child.stderr);
+// Many distinct malformed/valid runs triggered the second advisory's repeated
+// replacement-map scans, even after the earlier recursive backport was applied.
+const distinct = spawnSync(process.execPath, ['-e', `
+  const d = require(${JSON.stringify(queryRequire.resolve('decode-uri-component'))});
+  let input = '';
+  for (let i = 0; i < 40000; i++) {
+    input += '%' + (i >>> 8).toString(16).padStart(2,'0') + '%' + (i & 255).toString(16).padStart(2,'0') + 'x';
+  }
+  const value = d(input + '%ZZ');
+  if (!value.endsWith('%ZZ')) process.exit(2);
+`], {timeout: 5000, encoding: 'utf8'});
+assert.equal(distinct.error, undefined, `distinct-run decode timed out: ${distinct.error}`);
+assert.equal(distinct.status, 0, distinct.stderr);
 console.log('PASS compatible CommonJS URI decoder handles malformed percent input without recursive blowup');
 const filename = path.join(__dirname, '../src/app/+native-intent.ts');
 const js = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {

@@ -1,5 +1,5 @@
 import metadata from "@/assets/model/model_metadata.json";
-import { atomicReplaceFile, copyFileWithSha256, fingerprintFile } from "@/modules/AudioProcessorModule";
+import { atomicReplaceFile, copyFileWithSha256, fingerprintFile, linkPrivateFileNoReplace } from "@/modules/AudioProcessorModule";
 import * as fs from "expo-file-system";
 import { isProcessingMedia } from "./denoiserSingleton";
 import { sanitizeFileName } from "./formatHandler";
@@ -56,53 +56,98 @@ function uniqueSuffix(): string {
   return `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// Never reuse a temporary name within this JS process, even if a failed native
+// copy has already removed it and random/time values happen to collide.
+let tempSequence = 0;
+/** Reserve a private temporary name without ever truncating another file. */
+export function reservePrivateTemp(dir: fs.Directory, prefix: string): fs.File {
+  const ticket = ++tempSequence;
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const file = new fs.File(dir, `${prefix}${uniqueSuffix()}_${ticket}_${attempt}.tmp`);
+    try { file.create(); return file; }
+    catch (error) { if (!file.exists) throw error; }
+  }
+  throw new Error("Could not reserve a private temporary file.");
+}
+
 /**
- * Copy and hash the entire source in native streaming code. The temporary file
- * is never promoted until the copy succeeds. Identical bytes + names reuse an
- * immutable import; same-name/same-size *different* media cannot collide.
+ * Verify both the incoming private copy and any pre-existing digest-named
+ * destination. Publish via an atomic no-replace link; a competing import is
+ * verified too. A damaged earlier copy is left intact under its old name.
  */
 export async function importToDocuments(
   sourceUri: string,
   name: string,
   fallbackUri?: string,
   kind?: MediaKind,
+  onDamagedExistingCopy?: () => void,
 ): Promise<fs.File> {
   const dir = importsDir();
-  const pendingName = `_pending_${uniqueSuffix()}.tmp`;
-  const pending = new fs.File(dir, pendingName);
+  let pending = reservePrivateTemp(dir, "_pending_");
+  const reservedUris = [pending.uri];
   try {
     let digest: string;
     try {
       digest = await copyFileWithSha256(normalizeFileUri(sourceUri), pending.uri);
     } catch (primaryError) {
       if (!fallbackUri) throw primaryError;
-      // Native code removes partial files before rejecting.
+      // Native copy removes its partial destination on failure. Reserve a new
+      // name rather than recreating an unowned path for the fallback.
+      pending = reservePrivateTemp(dir, "_pending_");
+      reservedUris.push(pending.uri);
       digest = await copyFileWithSha256(normalizeFileUri(fallbackUri), pending.uri);
     }
     if (!/^[a-f0-9]{64}$/i.test(digest)) throw new Error("Could not verify imported file.");
-    const dest = new fs.File(dir, `${digest.toLowerCase()}_${safeName(name)}`);
-    if (!dest.exists) {
-      try {
-        await pending.move(dest);
-      } catch (error) {
-        // A concurrent import of the same digest can win the move.
-        if (!dest.exists) throw error;
+    digest = digest.toLowerCase();
+    const incoming = await checkedFingerprint(pending);
+    if (incoming.sha256 !== digest) throw new Error("The imported copy failed integrity verification; the source was not changed.");
+
+    const safe = safeName(name);
+    const dot = safe.lastIndexOf(".");
+    const base = dot > 0 ? safe.slice(0, dot) : safe;
+    const ext = dot > 0 ? safe.slice(dot) : "";
+    let damagedCanonical = false;
+    let dest: fs.File | null = null;
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const suffix = attempt === 0 ? "" : attempt === 1 ? "_verified" : `_verified_${uniqueSuffix()}_${attempt}`;
+      // Android's usual filename limit is 255 bytes; safeName is ASCII.
+      const baseLimit = Math.max(1, 255 - digest.length - 1 - suffix.length - ext.length);
+      const candidate = new fs.File(dir, `${digest}_${base.slice(0, baseLimit)}${suffix}${ext}`);
+      if (!candidate.exists) {
+        // This link either publishes the already-verified bytes or leaves the
+        // other winner untouched; the source remains until finally below.
+        if (await linkPrivateFileNoReplace(pending.uri, candidate.uri)) {
+          dest = candidate;
+          break;
+        }
       }
+      // A file may have appeared between exists and link, or been corrupted
+      // since a previous import. Never trust a filename as an integrity proof.
+      try {
+        const existing = await checkedFingerprint(candidate);
+        if (existing.bytes === incoming.bytes && existing.sha256 === digest) {
+          dest = candidate;
+          break;
+        }
+      } catch { /* unreadable or changing: keep it and use another name */ }
+      if (attempt === 0) damagedCanonical = true;
+    }
+    if (!dest) throw new Error("Could not allocate a separate verified import. The incoming source was not changed.");
+    if (damagedCanonical) {
+      try { onDamagedExistingCopy?.(); } catch (error) { console.warn("Import warning observer failed:", error); }
     }
     if (kind) {
-      // Never replace a user's earlier classification when importing a duplicate.
-      // If metadata cannot be saved, the durable media remains intact and the
-      // library asks the user to choose its kind before opening it later.
       try { await setImportedMediaKind(dest, kind, true); }
       catch (error) { console.warn("Could not save imported media type:", error); }
     }
     return dest;
   } finally {
-    // After move(), pending.uri points at dest; never delete a promoted file.
-    // Check against the original pending name instead of the mutable File URI.
-    const leftover = new fs.File(dir, pendingName);
-    if (leftover.exists) {
-      try { leftover.delete(); } catch { /* best effort */ }
+    // The reserved path is ours; any successful link remains under dest.
+    for (const uri of reservedUris) {
+      const leftover = new fs.File(uri);
+      if (leftover.exists) {
+        try { leftover.delete(); } catch { /* best effort */ }
+      }
     }
   }
 }

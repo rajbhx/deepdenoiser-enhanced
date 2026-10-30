@@ -37,13 +37,17 @@ const defaultSettings=()=>({attenLimDb:0,attenPreset:'max',runtime:'auto',coreMo
 const settingsMock={ATTEN_PRESET_DB:{light:20,medium:10,strong:5,max:0},getSettings:()=>S.getSettings(),updateSettings:patch=>S.updateSettings(patch),resolveCoreLevel:()=>4,incrementDenoiseCount:async()=>{}};
 const denoiser={createStream:value=>(S.streamStrength=value,{}),processFrame:async(_s,x)=>x};
 const singleton={beginRun:()=>{S.began++},endRun:()=>{S.ended++},isProcessingMedia:()=>false,getEngineLabel:()=> 'not-loaded',resetDenoiser:async()=>{},getDenoiser:()=>S.getDenoiser()};
-const nativeSafety={assertNativeRecorderIdle:()=>{S.statusChecks++;if(!S.nativeIdle)throw new Error('Native writer active')},
+class FakeHeaderMismatch extends Error {}
+const nativeSafety={RecordingHeaderMismatchError:FakeHeaderMismatch,
+  isRecordingFailureEvent:(e,uri)=>e?.reason==='recordingFailed'&&e.fileUri?.replace(/^file:\/+/, 'file:///')===uri?.replace(/^file:\/+/, 'file:///'),
+  isRecordingWorkerFailed:(s,uri)=>!!uri&&s?.isRecording===true&&s.fileUri===uri&&(s.hasRecordingError===true||s.isWriterActive===false),
+  assertNativeRecorderIdle:()=>{S.statusChecks++;if(!S.nativeIdle)throw new Error('Native writer active')},
   BoundedRecordingQueue:class{constructor(_a,_b,_consume,onIssue){this.error=null;this.overloaded=false;this.onIssue=onIssue}snapshot(){return{pendingSamples:0,pendingChunks:0,overloaded:this.overloaded,hasError:!!this.error}}enqueue(){return true}fail(error){this.error=error;this.onIssue?.('error')}async drain(){}},
-  ensureRecordingWavHeader:()=>{if(S.invalidRecording)throw new Error('Recording has no WAV header');return 56},
+  ensureRecordingWavHeader:()=>{if(S.headerMismatch)throw new FakeHeaderMismatch('The WAV header does not match. Audio may be missing.');if(S.invalidRecording)throw new Error('Recording has no WAV header');return 56},
   reconcileRecording:async()=>false,recordingsDir:()=>({uri:'file:///doc/recordings'})};
 const cacheMock={cleanupTempCache:async()=>{},placeOutput:async f=>f,readImportedMediaKind:f=>S.kinds.get(f.uri)||null,
   setImportedMediaKind:async(f,kind)=>{S.kinds.set(f.uri,kind)},removeImportedMediaKind:()=>{},getRebuildableCacheBytes:async()=>0,clearRebuildableCache:async()=>{},
-  importToDocuments:async(uri,name,_fallback,kind)=>{S.imports.push({uri,name,kind});const id=uri.split('/').pop();const f=new FakeFile(`file:///doc/imports/${id}`);S.files.set(f.uri,{size:100});if(kind&&!S.kinds.has(f.uri))S.kinds.set(f.uri,kind);return f}};
+  importToDocuments:async(uri,name,_fallback,kind,onDamaged)=>{if(S.damagedImport)onDamaged?.();S.imports.push({uri,name,kind});const id=uri.split('/').pop();const f=new FakeFile(`file:///doc/imports/${id}`);S.files.set(f.uri,{size:100});if(kind&&!S.kinds.has(f.uri))S.kinds.set(f.uri,kind);return f}};
 function getAudioPlayer(uri){
   if(!S.players[uri]) S.players[uri]={uri,currentTime:0,duration:100,playing:false,pause(){this.playing=false},play(){this.playing=true;S.plays++},seekTo:async time=>{S.seeks.push(time)},replace:()=>{S.retries++}};
   return S.players[uri];
@@ -59,12 +63,14 @@ const mocks={
   '@expo/vector-icons/Feather':'Feather','@expo/vector-icons':{Feather:'Feather'},
   '@expo/ui/jetpack-compose':{Host:'Host',LoadingIndicator:'LoadingIndicator',Switch:'Switch'},
   'expo-file-system':FS,'expo-image':{Image:'Image'},
+  'expo-linking':{openURL:url=>S.openURL(url)},
+  'expo-sharing':{isAvailableAsync:async()=>true,shareAsync:async uri=>{S.sharedUris.push(uri)}},
   'expo-router':{useRouter:()=>router,useIsFocused:()=>S.focused,useLocalSearchParams:()=>S.params},
   'expo-router/react-navigation':{useFocusEffect:callback=>React.useEffect(callback,[callback]),usePreventRemove:(active,callback)=>{S.prevent={active,callback}}},
   'expo-audio':{requestRecordingPermissionsAsync:async()=>({granted:true}),useAudioPlayer:getAudioPlayer,useAudioPlayerStatus:player=>S.audioStatus[player.uri]},
   'expo-video':{useVideoPlayer:(uri,setup)=>{const p=getVideoPlayer(uri);setup?.(p);return p},VideoView:'VideoView'},
   'expo-constants':{__esModule:true,default:{expoConfig:{version:'2.0.1'}}},
-  '@siteed/audio-studio':{AudioStudioModule:{status:()=>({isRecording:!S.nativeIdle,isPaused:false,isWriterActive:!S.nativeIdle})},useAudioRecorder:()=>{const [recording,setRecording]=React.useState(false),[paused,setPaused]=React.useState(false);return{
+  '@siteed/audio-studio':{AudioStudioModule:{status:()=>S.nativeStatus||({isRecording:!S.nativeIdle,isPaused:false,isWriterActive:!S.nativeIdle})},useAudioRecorder:()=>{const [recording,setRecording]=React.useState(false),[paused,setPaused]=React.useState(false);return{
     isRecording:recording,isPaused:paused,durationMs:0,
     startRecording:async config=>{const result=await S.nativeStart(config);setRecording(true);return result},
     stopRecording:async()=>{const result=await S.nativeStop();setRecording(false);setPaused(false);return result},pauseRecording:async()=>setPaused(true),resumeRecording:async()=>setPaused(false),
@@ -75,7 +81,7 @@ const mocks={
   '@/src/components/customSlider':'CustomSlider','@/src/components/silenceTrimSettings':'SilenceTrimSettingsBlock','@/src/components/SettingsSidebar':'SettingsSidebar',
   '@/src/scripts/settings':settingsMock,'../scripts/settings':settingsMock,
   '@/src/scripts/denoiserSingleton':singleton,'../scripts/denoiserSingleton':singleton,
-  '@/src/scripts/recordingSafety':nativeSafety,'@/src/scripts/denoiseCache':cacheMock,
+  '@/src/scripts/recordingSafety':nativeSafety,'@/src/scripts/recordingRecovery':{repairRecordingCopy:(...args)=>S.repairRecordingCopy(...args)},'@/src/scripts/denoiseCache':cacheMock,
   '@/src/scripts/alignedDenoiseStream':{AlignedDenoiseStream:class{async push(v){return v}async finish(){return new Float32Array()}}},
   '@/src/scripts/analytics':{trackAppEvent(){},trackAppError(){}},
   '@/src/scripts/diagnostics':{recordDiagnostic(){},recordDiagnosticError(){}},
@@ -92,8 +98,10 @@ const mocks={
 const oldLoad=Module._load;
 Module._load=function(request,parent,isMain){if(Object.hasOwn(mocks,request))return mocks[request];if(request.startsWith('@/'))return oldLoad.call(this,path.join(root,request.slice(2)),parent,isMain);return oldLoad.call(this,request,parent,isMain)};
 function reset(){
-  Object.assign(S,{alerts:[],routes:[],files:new Map(),kinds:new Map(),imports:[],params:{},prevent:null,audioStatus:{},players:{},videos:{},plays:0,seeks:[],retries:0,began:0,ended:0,statusChecks:0,nativeIdle:true,invalidRecording:false,privateMedia:[],streamStrength:null,focused:true,processingBusy:false});
+  Object.assign(S,{alerts:[],routes:[],files:new Map(),kinds:new Map(),imports:[],params:{},prevent:null,audioStatus:{},players:{},videos:{},plays:0,seeks:[],retries:0,began:0,ended:0,statusChecks:0,nativeIdle:true,nativeStatus:null,invalidRecording:false,headerMismatch:false,damagedImport:false,privateMedia:[],streamStrength:null,focused:true,processingBusy:false});
   S.getSettings=async()=>defaultSettings();S.updateSettings=async patch=>({...defaultSettings(),...patch});S.getDenoiser=async()=>denoiser;
+  S.urls=[];S.sharedUris=[];S.openURL=async url=>{S.urls.push(url)};
+  S.repairRecordingCopy=async()=>new FakeFile('file:///doc/denoised/recovered.wav');
   S.nativeStart=async()=>({fileUri:'file:///doc/recordings/test.wav'});S.nativeStop=async()=>({fileUri:'file:///doc/recordings/test.wav'});S.writePCMChunk=async()=>{};
   S.processMedia=async()=>({file:new FakeFile('file:///doc/denoised/out.wav'),seconds:1,cached:false,trimEnabled:false});S.pickDocument=async()=>({canceled:true});S.save=async()=> 'content://saved';
   S.discards=0;S.shareImports=0;S.importSharedMedia=async()=>{S.shareImports++;return [{uri:'file:///doc/imports/shared',name:'shared.wav',kind:'audio'}]};
@@ -108,6 +116,7 @@ async function unmount(tree){await act(async()=>tree.unmount())}
 const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).includes('react-test-renderer is deprecated'))originalError(...args)};
 (async()=>{
   const Process=require(path.join(root,'src/app/processing/process.tsx')).default;
+  const About=require(path.join(root,'src/app/(tabs)/about/index.tsx')).default;
   const Recording=require(path.join(root,'src/app/recording/index.tsx')).default;
   const History=require(path.join(root,'src/app/history/index.tsx')).default;
   const Home=require(path.join(root,'src/app/(tabs)/index.tsx')).default;
@@ -117,12 +126,24 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   const Bubble=require(path.join(root,'src/components/InfoBubble.tsx')).default;
   const Sidebar=require(path.join(root,'src/components/SettingsSidebar.tsx')).default;
   const Save=require(path.join(root,'src/components/SaveButton.tsx')).default;
+  const Share=require(path.join(root,'src/components/shareBtn.tsx')).default;
   const Video=require(path.join(root,'src/components/videoPlayer.tsx')).default;
+
+  reset();let tree=await mount(About);
+  assert.ok(allText(tree.root).includes('Version 2.0.1'));assert.ok(allText(tree.root).includes('Made by Sayampy'));
+  assert.match(allText(tree.root),/Android backup or device transfer/);assert.match(allText(tree.root),/processed on your device/);
+  await click(buttonByText(tree,'GitHub repository'));assert.deepEqual(S.urls,['https://github.com/sayampy/deepdenoiser']);
+  await click(buttonByText(tree,'Open-source licenses'));assert.equal(S.routes.at(-1),'/about/licenses');
+  await click(byLabel(tree,'Open settings'));assert.equal(tree.root.findByType('SettingsSidebar').props.visible,true);
+  await act(async()=>tree.root.findByType('SettingsSidebar').props.onClose());assert.equal(tree.root.findByType('SettingsSidebar').props.visible,false);
+  S.openURL=async()=>{throw new Error('browser unavailable')};await click(buttonByText(tree,'GitHub repository'));
+  assert.ok(S.alerts.some(a=>a[0]==='Could not open link'));await click(byLabel(tree,'Go back'));assert.equal(S.routes.at(-1),'back');await unmount(tree);
+  console.log('PASS minimalist About preserves version, privacy, attribution, source, licenses, settings and navigation');
 
   reset();const loaded=deferred(), processing=deferred();S.getSettings=()=>loaded.promise;
   S.params={batch:encodeURIComponent(JSON.stringify([{uri:'file:///doc/imports/clip',name:'clip',kind:'audio'}]))};S.files.set('file:///doc/imports/clip',{size:100});
   let captured;S.processMedia=(...args)=>{captured=args;return processing.promise};
-  let tree=await mount(Process);assert.equal(buttonByText(tree,'Loading settings…').props.disabled,true);
+  tree=await mount(Process);assert.equal(buttonByText(tree,'Loading settings…').props.disabled,true);
   await click(buttonByText(tree,'Loading settings…'));assert.equal(captured,undefined,'processing is gated before saved settings load');
   await act(async()=>loaded.resolve({...defaultSettings(),attenLimDb:20,attenPreset:'light'}));
   await click(buttonByText(tree,'Start denoising'));assert.equal(captured[3].attenLimDb,20);assert.equal(S.prevent.active,true);
@@ -130,6 +151,48 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   await act(async()=>stopAlert[2].find(x=>x.text==='Stop processing').onPress());assert.equal(captured[4].cancelled,true);
   await act(async()=>processing.resolve({file:new FakeFile('file:///doc/denoised/out.wav'),seconds:1,cached:false,trimEnabled:false}));await unmount(tree);
   console.log('PASS processing waits for settings and hardware Back requests a safe stop');
+
+  reset();S.params={batch:encodeURIComponent(JSON.stringify([{uri:'file:///doc/imports/clip',name:'clip.wav',kind:'audio'}]))};
+  S.files.set('file:///doc/imports/clip',{size:100});tree=await mount(Process);await click(buttonByText(tree,'Start denoising'));
+  let comparison=tree.root.findByType('CompareAudioPlayer');assert.equal(comparison.props.originalUri,'file:///doc/imports/clip');
+  assert.equal(comparison.props.cleanedUri,'file:///doc/denoised/out.wav');
+  let saveNodes=tree.root.findAllByType('SaveButton'),shareNodes=tree.root.findAllByType('ShareBtn');
+  assert.equal(saveNodes.length,1);assert.equal(saveNodes[0].props.file.uri,'file:///doc/denoised/out.wav');
+  assert.equal(shareNodes[0].props.uri,'file:///doc/denoised/out.wav');assert.equal(shareNodes[0].props.accessibilityLabel,'Share cleaned file');
+  const order=tree.root.findByType('ScrollView').findAll(n=>n.type==='CompareAudioPlayer'||n.type==='AdvanceSettings').map(n=>n.type);
+  assert.deepEqual(order,['CompareAudioPlayer','AdvanceSettings'],'the result is shown before settings');
+  assert.ok(buttonByText(tree,'Process again'));await act(async()=>saveNodes[0].props.onError(new Error('Synthetic save failure')));
+  assert.equal(tree.root.findByType('ErrorModal').props.visible,true);assert.match(tree.root.findByType('ErrorModal').props.error.message,/Synthetic save failure/);await unmount(tree);
+  console.log('PASS cleaned result prioritizes comparison, correct Save/Share and visible save errors while preserving reprocess');
+
+  reset();S.params={batch:encodeURIComponent(JSON.stringify([{uri:'file:///doc/imports/trim',name:'trim.wav',kind:'audio'}]))};
+  S.files.set('file:///doc/imports/trim',{size:100});S.processMedia=async()=>({file:new FakeFile('file:///doc/denoised/trim.wav'),seconds:1,cached:false,trimEnabled:true});
+  tree=await mount(Process);await click(buttonByText(tree,'Start denoising'));
+  assert.equal(tree.root.findAllByType('CompareAudioPlayer').length,0);
+  assert.deepEqual(tree.root.findAllByType('AudioPlayer').map(n=>n.props.uri).sort(),['file:///doc/denoised/trim.wav','file:///doc/imports/trim']);
+  assert.match(allText(tree.root),/Silence trimming changes the timeline/);await unmount(tree);
+
+  reset();S.params={batch:encodeURIComponent(JSON.stringify([{uri:'file:///doc/imports/video',name:'video.mp4',kind:'video'}]))};
+  S.files.set('file:///doc/imports/video',{size:100});S.processMedia=async()=>({file:new FakeFile('file:///doc/denoised/video.mp4'),seconds:1,cached:false,trimEnabled:false});
+  tree=await mount(Process);await click(buttonByText(tree,'Start denoising'));
+  assert.deepEqual(tree.root.findAllByType('VideoPlayer').map(n=>n.props.uri).sort(),['file:///doc/denoised/video.mp4','file:///doc/imports/video']);
+  assert.match(allText(tree.root),/Subtitles, extra tracks/);await unmount(tree);
+  console.log('PASS trimmed audio and video keep separate original and cleaned players and relevant output warnings');
+
+  reset();const batchItems=[{uri:'file:///doc/imports/a',name:'a.wav',kind:'audio'},{uri:'file:///doc/imports/b',name:'b.wav',kind:'audio'}];
+  S.params={batch:encodeURIComponent(JSON.stringify(batchItems))};for(const item of batchItems)S.files.set(item.uri,{size:100});
+  S.processMedia=async(_file,name)=>({file:new FakeFile(`file:///doc/denoised/${name}`),seconds:1,cached:false,trimEnabled:false});
+  tree=await mount(Process);await click(buttonByText(tree,'Process 2 files'));assert.equal(tree.root.findByType('SaveButton').props.file.uri,'file:///doc/denoised/b.wav');
+  await click(byLabel(tree,'a.wav, done'));assert.equal(tree.root.findByType('SaveButton').props.file.uri,'file:///doc/denoised/a.wav');
+  assert.equal(tree.root.findByType('ShareBtn').props.uri,'file:///doc/denoised/a.wav');await unmount(tree);
+  console.log('PASS batch result actions follow the selected file');
+
+  reset();S.params={batch:encodeURIComponent(JSON.stringify([{uri:'file:///doc/imports/bad',name:'bad.wav',kind:'audio'}]))};
+  S.files.set('file:///doc/imports/bad',{size:100});S.processMedia=async()=>{throw new Error('Synthetic processing failure')};
+  tree=await mount(Process);await click(buttonByText(tree,'Start denoising'));assert.match(allText(tree.root),/Synthetic processing failure/);
+  await click(buttonByText(tree,'View and copy error details'));assert.equal(tree.root.findByType('ErrorModal').props.visible,true);
+  assert.match(tree.root.findByType('ErrorModal').props.error.message,/Synthetic processing failure/);assert.equal(tree.root.findByType('AudioPlayer').props.uri,'file:///doc/imports/bad');await unmount(tree);
+  console.log('PASS processing failure details and original playback remain available');
 
   reset();const recSettings=deferred(), model=deferred();S.getSettings=()=>recSettings.promise;S.getDenoiser=()=>model.promise;
   tree=await mount(Recording);assert.equal(byLabel(tree,'Start recording').props.disabled,true);
@@ -155,6 +218,7 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
 
   reset();const starting=deferred();S.nativeStart=()=>starting.promise;tree=await mount(Recording);
   await click(byLabel(tree,'Start recording'));assert.equal(byLabel(tree,'Start recording').props.disabled,true);assert.ok(allText(tree.root).includes('Starting…'));
+  assert.equal(S.prevent.active,true);await act(async()=>S.prevent.callback());assert.equal(S.alerts.at(-1)[0],'Please wait');assert.match(S.alerts.at(-1)[1],/Starting the recorder/);
   assert.equal(tree.root.findByType('CustomSlider').parent.props.pointerEvents,'none','settings are blocked while native start is pending');
   await act(async()=>starting.resolve({fileUri:'file:///doc/recordings/test.wav'}));await unmount(tree);
   console.log('PASS recording startup visibly disables settings and shows progress');
@@ -192,25 +256,125 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
   await act(async()=>{await liveConfig.onAudioStream({data:new Float32Array(48000*4+1)})});
   assert.ok(allText(tree.root).includes('Live queue is full'));assert.ok(allText(tree.root).includes('live cleaning interrupted'));
-  S.nativeIdle=true;await unmount(tree);mocks['@/src/scripts/recordingSafety']=nativeSafety;
+  S.nativeIdle=true;await unmount(tree);
   console.log('PASS overloaded live queue reports a truthful status without changing original capture');
 
-  const liveView=require(path.join(root,'src/components/LiveModelView.tsx'));
-  const plotColumn={index:5,input:Array(16).fill(2),output:Array(16).fill(1),change:Array(16).fill(-1)};
-  const paths=liveView.spectrumPaths([plotColumn],5,'input');assert.match(paths[2],/M31 15h1v1h-1z/);assert.equal(paths[1],'');
-  assert.match(liveView.liveModelStatus({modelFrames:9},null,'error',false),/stopped/i);
-  assert.match(liveView.liveModelStatus({modelFrames:9},{pendingSamples:48000,pendingChunks:1,overloaded:false,hasError:false},null,false),/behind/i);
-  reset();const enableCalls=[];
-  const fakeMonitor={setEnabled:v=>enableCalls.push(v),snapshot:()=>({modelFrames:9,latestIndex:5,columns:[plotColumn],visualizationAvailable:true})};
-  const fakeQueue={snapshot:()=>({pendingSamples:480,pendingChunks:1,overloaded:false,hasError:false})};
-  tree=await mount(liveView.default,{monitor:fakeMonitor,queue:fakeQueue,issue:null,paused:false,strength:'Strong'});
-  assert.ok(allText(tree.root).includes('Processing live audio'));assert.ok(allText(tree.root).includes('Changes can include speech'));
-  await click(byLabel(tree,'Hide live frequency displays'));assert.equal(enableCalls.at(-1),false);
-  await act(async()=>S.appStateCallback('background'));await act(async()=>S.appStateCallback('active'));assert.equal(enableCalls.at(-1),false,'hidden graphs stay off after foregrounding');
-  await click(byLabel(tree,'Show live frequency displays'));assert.equal(enableCalls.at(-1),true);
-  await act(async()=>S.appStateCallback('background'));assert.equal(enableCalls.at(-1),false);
-  await act(async()=>S.appStateCallback('active'));assert.equal(enableCalls.at(-1),true);await unmount(tree);
-  console.log('PASS live view displays honest statuses and stops visual work when hidden or backgrounded');
+  reset();const backlogGate=deferred();S.writePCMChunk=()=>backlogGate.promise;
+  S.nativeStart=async config=>{liveConfig=config;S.nativeIdle=false;return{fileUri:'file:///doc/recordings/test.wav'}};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+  await act(async()=>{await liveConfig.onAudioStream({data:new Float32Array(24000)})});
+  assert.match(allText(tree.root),/Live cleaning is behind the microphone/);
+  await click(byLabel(tree,'Pause recording'));assert.match(allText(tree.root),/Microphone paused; finishing queued audio/);
+  await click(byLabel(tree,'Resume recording'));assert.match(allText(tree.root),/Live cleaning is behind the microphone/);
+  await act(async()=>backlogGate.resolve());assert.doesNotMatch(allText(tree.root),/Live cleaning is behind the microphone/);
+  S.nativeIdle=true;await unmount(tree);console.log('PASS backlog warning appears and clears on threshold changes without a display timer');
+
+  // Native failure can precede the Start promise. Old-session events are
+  // ignored; the warning must remain prominent and Stop must stay available.
+  reset();let failedConfig,failedUri;
+  S.nativeStart=async config=>{failedConfig=config;failedUri=`file:///doc/recordings/${config.filename}.wav`;
+    S.files.set(failedUri,{size:100});S.nativeIdle=false;
+    config.onRecordingInterrupted({reason:'recordingFailed',fileUri:failedUri});return{fileUri:failedUri}};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+  assert.match(allText(tree.root),/Recording stopped unexpectedly/);assert.match(allText(tree.root),/Some audio may be missing/);
+  assert.equal(byLabel(tree,'Pause recording').props.disabled,true);assert.ok(byLabel(tree,'Stop and save recording'));assert.equal(S.prevent.active,true);
+  await act(async()=>S.prevent.callback());assert.equal(S.alerts.at(-1)[0],'Recording stopped unexpectedly');
+  assert.ok(S.alerts.at(-1)[2].some(x=>x.text==='Stop and save'));
+  S.nativeStop=async()=>{S.nativeIdle=true;throw Error('RECORDING_FAILED')};
+  await click(byLabel(tree,'Stop and save recording'));assert.match(tree.root.findByType('ErrorModal').props.error.message,/Audio may be missing/);
+  assert.ok(S.files.has(failedUri));assert.equal(S.prevent.active,true);
+  await click(buttonByText(tree,'Check recorder status'));assert.equal(S.prevent.active,false);assert.ok(S.files.has(failedUri));await unmount(tree);
+
+  reset();S.nativeStart=async config=>{failedConfig=config;failedUri='file:///doc/recordings/test.wav';S.nativeIdle=false;return{fileUri:failedUri}};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+  await act(async()=>failedConfig.onRecordingInterrupted({reason:'recordingFailed',fileUri:'file:///doc/recordings/older.wav'}));
+  assert.doesNotMatch(allText(tree.root),/Recording stopped unexpectedly/);
+  await act(async()=>failedConfig.onRecordingInterrupted({reason:'recordingFailed',fileUri:failedUri}));
+  assert.match(allText(tree.root),/Recording stopped unexpectedly/);S.nativeIdle=true;await unmount(tree);
+  console.log('PASS fatal native worker events warn immediately, ignore stale recordings, disable pause and retain Stop');
+
+  // Status fallback catches a missed event without confusing normal Stop.
+  reset();let watchdog;const realSetInterval=global.setInterval,realClearInterval=global.clearInterval;
+  global.setInterval=fn=>{watchdog=fn;return 123};global.clearInterval=()=>{};
+  try {
+    S.nativeStart=async()=>{S.nativeIdle=false;return{fileUri:'file:///doc/recordings/test.wav'}};
+    tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+    S.nativeStatus={isRecording:true,isWriterActive:false,hasRecordingError:true,fileUri:'file:///doc/recordings/test.wav'};
+    await act(async()=>watchdog());assert.match(allText(tree.root),/Recording stopped unexpectedly/);
+    S.nativeIdle=true;await unmount(tree);
+  } finally {global.setInterval=realSetInterval;global.clearInterval=realClearInterval}
+  console.log('PASS native status watchdog reports a missed worker-failure event');
+
+  // Exercise each delayed stage and the actual usePreventRemove callback, not
+  // just the string or whether a back-arrow prop was rendered.
+  reset();const stopStage=deferred(),queueStage=deferred(),compareStage=deferred(),processStage=deferred();
+  let stageConfig;S.writePCMChunk=()=>queueStage.promise;
+  S.nativeStart=async config=>{stageConfig=config;S.nativeIdle=false;S.files.set('file:///doc/recordings/test.wav',{size:100});return{fileUri:'file:///doc/recordings/test.wav'}};
+  S.nativeStop=()=>stopStage.promise;
+  S.processMedia=()=>processStage.promise;
+  mocks['@/src/scripts/recordingSafety'].reconcileRecording=()=>compareStage.promise;
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+  await act(async()=>{await stageConfig.onAudioStream({data:new Float32Array(100)})});
+  await act(async()=>{void byLabel(tree,'Stop and save recording').props.onPress();await Promise.resolve()});
+  assert.match(allText(tree.root),/Stopping microphone and closing recorder/);assert.equal(S.prevent.active,true);
+  await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Stopping microphone/);
+  assert.equal(byLabel(tree,'Go back').props.disabled,true);
+  S.nativeIdle=true;await act(async()=>stopStage.resolve({fileUri:'file:///doc/recordings/test.wav'}));
+  assert.match(allText(tree.root),/Finishing queued live audio/);assert.equal(S.prevent.active,true);
+  await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Finishing queued live audio/);
+  await act(async()=>queueStage.resolve());assert.match(allText(tree.root),/Checking recorded samples and finishing missing audio/);
+  await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Checking recorded samples/);
+  await act(async()=>compareStage.resolve(false));assert.match(allText(tree.root),/Denoising complete recording/);
+  await act(async()=>S.prevent.callback());assert.match(S.alerts.at(-1)[1],/Denoising complete recording/);
+  await act(async()=>processStage.resolve({file:new FakeFile('file:///doc/denoised/out.wav')}));
+  assert.equal(S.prevent.active,false);assert.equal(byLabel(tree,'Go back').props.disabled,false);await unmount(tree);
+  console.log('PASS host Back guard and stage labels track delayed Stop, queue, reconciliation and full processing');
+
+  reset();const reconcileGate=deferred();mocks['@/src/scripts/recordingSafety'].reconcileRecording=()=>reconcileGate.promise;
+  S.nativeStart=async()=>{S.nativeIdle=false;S.files.set('file:///doc/recordings/test.wav',{size:100});return{fileUri:'file:///doc/recordings/test.wav'}};
+  S.nativeStop=async()=>{S.nativeIdle=true;return{fileUri:'file:///doc/recordings/test.wav'}};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));
+  await act(async()=>{void byLabel(tree,'Stop and save recording').props.onPress();await Promise.resolve();await Promise.resolve()});
+  assert.match(allText(tree.root),/Checking recorded samples and finishing missing audio/);assert.equal(byLabel(tree,'Go back').props.disabled,true);assert.equal(S.prevent.active,true);
+  await act(async()=>reconcileGate.resolve(false));
+  comparison=tree.root.findByType('CompareAudioPlayer');assert.equal(comparison.props.originalUri,'file:///doc/recordings/test.wav');
+  assert.equal(comparison.props.cleanedUri,'file:///doc/denoised/out.wav');
+  saveNodes=tree.root.findAllByType('SaveButton');shareNodes=tree.root.findAllByType('ShareBtn');
+  assert.deepEqual(saveNodes.map(n=>[n.props.label,n.props.file.uri,n.props.albumName]),[
+    ['Save original','file:///doc/recordings/test.wav','DeepDenoiser Recordings'],
+    ['Save cleaned','file:///doc/denoised/out.wav','DeepDenoiser Recordings']]);
+  assert.deepEqual(shareNodes.map(n=>[n.props.accessibilityLabel,n.props.uri]),[
+    ['Share original recording','file:///doc/recordings/test.wav'],['Share cleaned recording','file:///doc/denoised/out.wav']]);
+  await act(async()=>saveNodes[1].props.onError(new Error('Synthetic recording save failure')));
+  assert.equal(tree.root.findByType('ErrorModal').props.visible,true);assert.match(tree.root.findByType('ErrorModal').props.error.message,/Synthetic recording save failure/);
+  await click(buttonByText(tree,'Record New'));assert.ok(byLabel(tree,'Start recording'));await unmount(tree);
+  console.log('PASS finalization guards Back and compact recording results retain distinct playback, save, share, destination and errors');
+
+  reset();mocks['@/src/scripts/recordingSafety'].reconcileRecording=async()=>false;
+  S.nativeStart=async()=>{S.nativeIdle=false;S.files.set('file:///doc/recordings/test.wav',{size:100});return{fileUri:'file:///doc/recordings/test.wav'}};
+  S.nativeStop=async()=>{S.nativeIdle=true;return{fileUri:'file:///doc/recordings/test.wav'}};
+  tree=await mount(QueueRecording);await act(async()=>tree.root.findByType('SilenceTrimSettingsBlock').props.onChange({enabled:true,mode:'auto',thresholdDb:-40,minSilenceMs:500}));
+  await click(byLabel(tree,'Start recording'));await click(byLabel(tree,'Stop and save recording'));
+  assert.equal(tree.root.findAllByType('CompareAudioPlayer').length,0);
+  assert.deepEqual(tree.root.findAllByType('AudioPlayer').map(n=>n.props.uri),['file:///doc/recordings/test.wav','file:///doc/denoised/out.wav']);
+  assert.match(allText(tree.root),/Silence trimming changes the timeline/);assert.equal(tree.root.findAllByType('SaveButton').length,2);await unmount(tree);
+
+  reset();S.nativeStart=async()=>{S.nativeIdle=false;S.files.set('file:///doc/recordings/test.wav',{size:100});return{fileUri:'file:///doc/recordings/test.wav'}};
+  S.nativeStop=async()=>{S.nativeIdle=true;return{fileUri:'file:///doc/recordings/test.wav'}};S.processMedia=async()=>{throw new Error('Synthetic recording processing failure')};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));await click(byLabel(tree,'Stop and save recording'));
+  assert.match(allText(tree.root),/Original ready/);assert.equal(tree.root.findByType('AudioPlayer').props.uri,'file:///doc/recordings/test.wav');
+  assert.deepEqual(tree.root.findAllByType('SaveButton').map(n=>n.props.label),['Save original']);
+  assert.match(tree.root.findByType('ErrorModal').props.error.message,/original was kept/i);await unmount(tree);
+  mocks['@/src/scripts/recordingSafety']=nativeSafety;
+  console.log('PASS trimmed recordings retain separate players and failed denoising retains original playback and export');
+
+  reset();S.headerMismatch=true;
+  S.nativeStart=async()=>{S.nativeIdle=false;S.files.set('file:///doc/recordings/test.wav',{size:100});return{fileUri:'file:///doc/recordings/test.wav'}};
+  S.nativeStop=async()=>{S.nativeIdle=true;return{fileUri:'file:///doc/recordings/test.wav'}};
+  tree=await mount(QueueRecording);await click(byLabel(tree,'Start recording'));await click(byLabel(tree,'Stop and save recording'));
+  assert.match(tree.root.findByType('ErrorModal').props.error.message,/Audio may be missing/);
+  assert.ok(S.files.has('file:///doc/recordings/test.wav'));assert.equal(tree.root.findAllByType('SaveButton').length,0);
+  await unmount(tree);console.log('PASS Stop refuses a mismatched native WAV without publishing or modifying it');
 
   reset();const pendingStart=deferred();let cleanupStops=0;S.nativeStart=()=>{S.nativeIdle=false;return pendingStart.promise};
   S.nativeStop=async()=>{cleanupStops++;S.nativeIdle=true;return{fileUri:'file:///doc/recordings/test.wav'}};
@@ -229,6 +393,18 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   await click(byLabel(tree,'Delete empty.wav'));S.nativeIdle=false;await act(async()=>S.alerts.at(-1)[2].find(x=>x.text==='Delete').onPress());assert.ok(bad.exists,'active writer blocks deletion');
   S.nativeIdle=true;await click(byLabel(tree,'Delete empty.wav'));await act(async()=>S.alerts.at(-1)[2].find(x=>x.text==='Delete').onPress());assert.equal(bad.exists,false);await unmount(tree);
   console.log('PASS invalid recordings can be deleted only after native writer verification');
+
+  reset();const mismatch=new FakeFile('file:///doc/recordings/mismatch.wav');S.files.set(mismatch.uri,{size:100});S.headerMismatch=true;
+  S.privateMedia=[{file:mismatch,name:'mismatch.wav',group:'recordings',size:100,modified:0,video:false,kindKnown:true,partial:false}];
+  let repairedFrom=null;S.repairRecordingCopy=async file=>{repairedFrom=file.uri;return new FakeFile('file:///doc/denoised/recovered.wav')};
+  tree=await mount(History);await click(buttonByText(tree,'Recordings'));await click(byLabel(tree,'mismatch.wav, 100 B'));
+  assert.match(allText(tree.root),/Audio may be missing/);assert.ok(buttonByText(tree,'Repair copy'));
+  assert.equal(tree.root.findAllByType('AudioPlayer').length,0);assert.equal(tree.root.findAllByType('SaveButton').length,0);
+  assert.equal(tree.root.findByType('ShareBtn').props.accessibilityLabel,'Share original as-is');
+  await click(buttonByText(tree,'Repair copy'));assert.match(S.alerts.at(-1)[1],/original will remain unchanged/i);
+  await act(async()=>S.alerts.at(-1)[2].find(x=>x.text==='Repair copy').onPress());
+  assert.equal(repairedFrom,mismatch.uri);assert.ok(mismatch.exists);assert.ok(S.alerts.some(a=>a[0]==='Repaired copy saved'));
+  await unmount(tree);console.log('PASS History warns about missing audio and requests confirmation before repairing a separate copy');
 
   reset();const legacy=new FakeFile('file:///doc/imports/voice.mp4');S.files.set(legacy.uri,{size:20});
   S.privateMedia=[{file:legacy,name:'voice.mp4',group:'imports',size:20,modified:0,video:true,kindKnown:false,partial:false}];
@@ -260,13 +436,22 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   console.log('PASS settings saving serializes taps and exposes About and Diagnostics');
 
   reset();const saving=deferred();let saveCalls=0;S.save=()=>{saveCalls++;return saving.promise};const file=new FakeFile('file:///doc/denoised/out.wav');S.files.set(file.uri,{size:4});
-  tree=await mount(Save,{file,label:'Save'});await click(buttonByText(tree,'Save'));assert.equal(buttonByText(tree,'Saving…').props.disabled,true);await click(buttonByText(tree,'Saving…'));assert.equal(saveCalls,1);
-  await act(async()=>saving.resolve('content://saved'));assert.ok(S.alerts.some(x=>x[0]==='Saved to device'&&x[1].includes('Music/DeepDenoiser Audio')));await unmount(tree);
-  console.log('PASS saving shows progress, blocks duplicates and reports the destination');
+  tree=await mount(Save,{file,label:'Save original',savingLabel:'Saving original',savedLabel:'Original saved'});await click(buttonByText(tree,'Save original'));
+  assert.equal(buttonByText(tree,'Saving…').props.disabled,true);assert.equal(byLabel(tree,'Saving original').props.disabled,true);
+  await click(buttonByText(tree,'Saving…'));assert.equal(saveCalls,1);
+  await act(async()=>saving.resolve('content://saved'));assert.ok(byLabel(tree,'Original saved'));
+  assert.ok(S.alerts.some(x=>x[0]==='Saved to device'&&x[1].includes('Music/DeepDenoiser Audio')));await unmount(tree);
+  console.log('PASS saving identifies the track, blocks duplicates and reports the destination');
 
   reset();S.save=async()=>{throw new Error('No space left on device')};tree=await mount(Save,{file,label:'Save'});
   await click(buttonByText(tree,'Save'));assert.ok(S.alerts.some(a=>a[0]==='Could not save'&&a[1].includes('No space left on device')));await unmount(tree);
   console.log('PASS saving reports the native failure cause');
+
+  reset();tree=await mount(Share,{uri:'file:///original.wav',accessibilityLabel:'Share original recording'});
+  await click(tree.root.find(n=>n.type==='TouchableOpacity'&&n.props.accessibilityLabel==='Share original recording'));assert.deepEqual(S.sharedUris,['file:///original.wav']);await unmount(tree);
+  tree=await mount(Share,{uri:'file:///cleaned.wav',accessibilityLabel:'Share cleaned recording'});
+  await click(tree.root.find(n=>n.type==='TouchableOpacity'&&n.props.accessibilityLabel==='Share cleaned recording'));assert.deepEqual(S.sharedUris,['file:///original.wav','file:///cleaned.wav']);await unmount(tree);
+  console.log('PASS share controls expose distinct accessible labels and pass the correct file');
 
   reset();tree=await mount(()=>React.createElement(React.Fragment,null,React.createElement(Video,{uri:'v1',name:'one'}),React.createElement(Video,{uri:'v2',name:'two'})));
   await act(async()=>S.videos.v1.emit('playingChange',{isPlaying:true}));assert.equal(S.videos.v2.pauses,1);
@@ -292,6 +477,11 @@ const originalError=console.error;console.error=(...args)=>{if(!String(args[0]).
   tree=await mount(ShareHandler);assert.equal(S.shareImports,0);assert.ok(allText(tree.root).includes('Shared files are waiting'));
   await click(buttonByText(tree,'Go back'));assert.equal(S.routes.at(-1),'back');await unmount(tree);
   console.log('PASS share handling waits for focus and active recording/processing before navigating');
+
+  reset();S.damagedImport=true;S.pickDocument=async()=>({canceled:false,assets:[{uri:'content://pick/recovered',name:'sound.wav',mimeType:'audio/wav'}]});
+  tree=await mount(Home);await click(buttonByText(tree,'Import media'));
+  assert.ok(S.alerts.some(a=>a[0]==='Older import failed verification'&&a[1].includes('not overwritten')));await unmount(tree);
+  console.log('PASS picker warns when an older private import could not be verified');
 
   reset();S.pickDocument=async()=>({canceled:false,assets:Array.from({length:19},(_,i)=>({uri:`content://pick/${i}`,name:`item${i}.wav`,mimeType:'audio/wav'}))});
   tree=await mount(Home);await click(buttonByText(tree,'Import media'));assert.equal(tree.root.findAll(n=>typeof n.props.accessibilityLabel==='string'&&n.props.accessibilityLabel.startsWith('Remove item')).length,19);

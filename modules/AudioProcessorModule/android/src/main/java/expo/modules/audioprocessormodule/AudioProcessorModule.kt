@@ -175,6 +175,18 @@ class AudioProcessorModule : Module() {
             }
         }
 
+        // Atomically publish a completed private file, never replacing a name
+        // that another import/recovery published first.
+        AsyncFunction("linkPrivateFileNoReplace") { sourceUri: String, targetUri: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    promise.resolve(NoReplaceFile.link(sourceUri, targetUri))
+                } catch (e: Exception) {
+                    promise.reject("ERR_PRIVATE_PROMOTION", e.message ?: e.toString(), e)
+                }
+            }
+        }
+
         AsyncFunction("fingerprintFile") { sourceUri: String, promise: Promise ->
             moduleScope.launch {
                 try {

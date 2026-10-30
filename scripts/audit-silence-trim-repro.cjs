@@ -1,6 +1,7 @@
-// Diagnostic reproducer, not a desired-behavior regression test.
-// Extracts the actual Kotlin trim/copy methods and dispatch branch from the
-// current AudioProcessor.kt, compiles them with the actual PcmIntegrity.java,
+// Historical reproducer for the pre-fix 2.0.5 source, not a regression test.
+// It is expected to fail against the fixed source; run tests/trim-dispatch.test.cjs instead.
+// Extracts the original Kotlin trim/copy methods and dispatch branch and compiles
+// them with the original PcmIntegrity.java,
 // and executes synthetic PCM on the host JVM. No Android codec is exercised.
 // Requires Java, javac and kotlinc on PATH, or set KOTLINC to its binary.
 const assert = require('node:assert/strict');

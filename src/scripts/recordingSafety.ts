@@ -28,6 +28,7 @@ export class BoundedRecordingQueue {
   private chain: Promise<void> = Promise.resolve();
   private depth = 0;
   private samples = 0;
+  private behind = false;
   public overloaded = false;
   public error: Error | null = null;
 
@@ -36,6 +37,7 @@ export class BoundedRecordingQueue {
     private readonly maxSamples: number,
     private readonly consume: (samples: Float32Array) => Promise<void>,
     private readonly onIssue?: (issue: RecordingQueueIssue) => void,
+    private readonly backlogWarning?: { thresholdSamples: number; onChange: (behind: boolean) => void },
   ) {}
 
   /** Read-only approximate backlog for the interface, including in-flight work. */
@@ -53,6 +55,16 @@ export class BoundedRecordingQueue {
   private notify(issue: RecordingQueueIssue): void {
     try { this.onIssue?.(issue); }
     catch (error) { console.warn("Recording status observer failed:", error); }
+  }
+
+  /** Notify only when the backlog crosses the warning threshold, without a polling timer. */
+  private notifyBacklog(): void {
+    if (!this.backlogWarning) return;
+    const behind = this.samples >= this.backlogWarning.thresholdSamples;
+    if (behind === this.behind) return;
+    this.behind = behind;
+    try { this.backlogWarning.onChange(behind); }
+    catch (error) { console.warn("Recording backlog observer failed:", error); }
   }
 
   enqueue(input: Float32Array): boolean {
@@ -73,7 +85,9 @@ export class BoundedRecordingQueue {
     }).finally(() => {
       this.depth--;
       this.samples -= copy.length;
+      this.notifyBacklog();
     });
+    this.notifyBacklog();
     return true;
   }
 
@@ -98,17 +112,27 @@ function tag(bytes: Uint8Array, start: number, value: string): boolean {
   return [...value].every((letter, i) => bytes[start + i] === letter.charCodeAt(0));
 }
 
-/**
- * Verify the recorder's fixed 44-byte mono PCM16 WAV header. After an app
- * interruption the data is still there but the final size fields can be zero;
- * repair just those fields in place, leaving the actual samples untouched.
- * Call only when the recorder is no longer writing this file.
- */
-export function ensureRecordingWavHeader(file: fs.File): number {
+/** A size mismatch can mean an interrupted header OR missing audio. */
+export class RecordingHeaderMismatchError extends Error {
+  constructor() {
+    super("The WAV header does not match the file. Audio may be missing. The original was not changed; use Repair copy in Your files.");
+    this.name = "RecordingHeaderMismatchError";
+  }
+}
+
+export interface RecordingHeaderInspection {
+  dataBytes: number;
+  declaredDataBytes: number;
+  declaredRiffBytes: number;
+  needsRepair: boolean;
+}
+
+/** Read only: never change an original's header during validation or preview. */
+export function inspectRecordingWavHeader(file: fs.File): RecordingHeaderInspection {
   if (!file.exists || file.size < 44) throw new Error("Recording has no WAV header");
   const dataBytes = file.size - 44;
   if (dataBytes % 2 || dataBytes > 0xffffffff - 36) throw new Error("Recording has an invalid or unsupported PCM length");
-  const handle = file.open();
+  const handle = file.open(fs.FileMode.ReadOnly);
   try {
     const header = handle.readBytes(44);
     if (header.length !== 44 || !tag(header, 0, "RIFF") || !tag(header, 8, "WAVE") ||
@@ -118,17 +142,42 @@ export function ensureRecordingWavHeader(file: fs.File): number {
     const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
     if (view.getUint32(16, true) !== 16 || view.getUint16(20, true) !== 1 ||
         view.getUint16(22, true) !== 1 || view.getUint32(24, true) !== 48000 ||
+        view.getUint32(28, true) !== 96000 || view.getUint16(32, true) !== 2 ||
         view.getUint16(34, true) !== 16) {
       throw new Error("Recording is not 48 kHz mono PCM16");
     }
-    if (view.getUint32(4, true) !== dataBytes + 36 || view.getUint32(40, true) !== dataBytes) {
-      view.setUint32(4, dataBytes + 36, true);
-      view.setUint32(40, dataBytes, true);
-      handle.offset = 0;
-      handle.writeBytes(header);
-    }
-    return dataBytes;
+    const declaredRiffBytes = view.getUint32(4, true);
+    const declaredDataBytes = view.getUint32(40, true);
+    return { dataBytes, declaredDataBytes, declaredRiffBytes,
+      needsRepair: declaredRiffBytes !== dataBytes + 36 || declaredDataBytes !== dataBytes };
   } finally { handle.close(); }
+}
+
+/** Require a valid header; unlike the old implementation this NEVER repairs in place. */
+export function ensureRecordingWavHeader(file: fs.File): number {
+  const inspection = inspectRecordingWavHeader(file);
+  if (inspection.needsRepair) throw new RecordingHeaderMismatchError();
+  return inspection.dataBytes;
+}
+
+/** Compare native and JS file URIs without conflating different recording sessions. */
+function sameRecordingUri(a: unknown, b: unknown): boolean {
+  if (typeof a !== "string" || typeof b !== "string" || !a || !b) return false;
+  const canonical = (uri: string) => uri.replace(/^file:\/+/, "file:///");
+  return canonical(a) === canonical(b);
+}
+
+/** Immediate native event and status fallback use the same session-specific rule. */
+export function isRecordingFailureEvent(event: unknown, expectedUri: string | undefined): boolean {
+  if (!event || typeof event !== "object") return false;
+  const value = event as { reason?: unknown; fileUri?: unknown };
+  return value.reason === "recordingFailed" && sameRecordingUri(value.fileUri, expectedUri);
+}
+export function isRecordingWorkerFailed(status: unknown, expectedUri: string | undefined): boolean {
+  if (!status || typeof status !== "object") return false;
+  const value = status as { isRecording?: unknown; isWriterActive?: unknown; hasRecordingError?: unknown; fileUri?: unknown };
+  return value.isRecording === true && sameRecordingUri(value.fileUri, expectedUri) &&
+    (value.hasRecordingError === true || value.isWriterActive === false);
 }
 
 /**
@@ -144,8 +193,8 @@ export async function reconcileRecording(
 ): Promise<boolean> {
   const totalBytes = ensureRecordingWavHeader(nativeWav);
   if (!streamedPcm.exists || streamedPcm.size % 2 || streamedPcm.size > totalBytes) return false;
-  const wav = nativeWav.open();
-  const stream = streamedPcm.open();
+  const wav = nativeWav.open(fs.FileMode.ReadOnly);
+  const stream = streamedPcm.open(fs.FileMode.ReadOnly);
   const block = 128 * 1024;
   try {
     wav.offset = 44;

@@ -58,8 +58,11 @@ export default function HomeScreen() {
       try {
         setLoadingLabel("Preparing shared files…"); setIsLoading(true);
         recordDiagnostic("share", "share", "START");
+        let damagedImport = false;
         const selection = await importSharedMedia(sharedPayloads,
-          (current, total) => setLoadingLabel(`Importing shared file ${current} of ${total}…`));
+          (current, total) => setLoadingLabel(`Importing shared file ${current} of ${total}…`),
+          () => { damagedImport = true; });
+        if (damagedImport) Alert.alert("Older import failed verification", "An older private copy could not be verified and was not overwritten. A separate verified copy was selected. Check Your files for both copies.");
         navigatingFromShare.current = true;
         recordDiagnostic("share", "share", "OK");
         consumeShare(sharedPayloads, shareGeneration);
@@ -90,6 +93,7 @@ export default function HomeScreen() {
     recordDiagnostic("import", "import", "START");
     setLoadingLabel("Opening file picker…"); setIsLoading(true);
     const added: SelectedMedia[] = [];
+    let damagedImport = false;
     try {
       const result = await pickDocument({ type: ["audio/*", "video/*"], copyToCacheDirectory: false, multiple: true });
       if (result.canceled || !result.assets?.length) { recordDiagnostic("import", "import", "CANCELLED"); return; }
@@ -98,7 +102,7 @@ export default function HomeScreen() {
         const asset = result.assets[i];
         setLoadingLabel(`Importing ${i + 1} of ${result.assets.length}…`);
         const detectedKind = mediaKind(asset.name, asset.mimeType);
-        const imported = await importToDocuments(asset.uri, asset.name, undefined, detectedKind);
+        const imported = await importToDocuments(asset.uri, asset.name, undefined, detectedKind, () => { damagedImport = true; });
         // Count immutable imported identities, not raw picker selections.
         if (seen.has(imported.uri)) continue;
         if (seen.size >= MAX_BATCH_FILES) {
@@ -109,6 +113,7 @@ export default function HomeScreen() {
         added.push({ uri: imported.uri, name: asset.name, kind: readImportedMediaKind(imported) ?? detectedKind });
       }
       recordDiagnostic("import", "import", "OK");
+      if (damagedImport) Alert.alert("Older import failed verification", "An older private copy could not be verified and was not overwritten. A separate verified copy was selected. Check Your files for both copies.");
     } catch (importError) {
       recordDiagnosticError("import", "import", importError);
       setError(importError instanceof Error ? importError : new Error(String(importError)));

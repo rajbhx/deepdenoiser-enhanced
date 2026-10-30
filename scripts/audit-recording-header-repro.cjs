@@ -1,5 +1,6 @@
-// Diagnostic reproducer, not a desired-behavior regression test.
-// Runs the actual TypeScript header repair against a disposable truncated WAV.
+// Historical reproducer for the pre-fix 2.0.5 source, not a regression test.
+// It is expected to fail against the fixed source; run tests/recording-recovery.test.cjs instead.
+// Runs the original TypeScript header repair against a disposable truncated WAV.
 // It demonstrates that a declared-size mismatch is repaired without warning;
 // it does not model Android process crashes or prove how truncation occurred.
 const assert = require('node:assert/strict');

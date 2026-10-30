@@ -1,4 +1,6 @@
-# DeepDenoiser 2.0.5 — live model view
+# DeepDenoiser 2.0.5 — live model view (historical)
+
+> This document describes the previously delivered 2.0.5 test build. The 2.0.6 source removes the Live Model View, its analysis buffers and polling. The recorder still denoises and shows event-driven backlog, overload and error warnings. The historical chart-specific validation below does not apply to the new source.
 
 ## What the screen shows
 

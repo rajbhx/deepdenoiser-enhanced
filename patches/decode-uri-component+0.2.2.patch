@@ -1,14 +1,13 @@
-diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-uri-component/index.js
 --- a/node_modules/decode-uri-component/index.js
 +++ b/node_modules/decode-uri-component/index.js
-@@ -1,59 +1,145 @@
+@@ -1,27 +1,60 @@
  'use strict';
 -var token = '%[a-f0-9]{2}';
 -var singleMatcher = new RegExp('(' + token + ')|([^%]+?)', 'gi');
 -var multiMatcher = new RegExp('(' + token + ')+', 'gi');
-+// CVE-2026-45822: backport the linear UTF-8 decoder from decode-uri-component 0.5.0.
-+// Retain the 0.2.x CommonJS export and '+'-to-space behavior for query-string 7.
-+// Upstream MIT: https://github.com/SamVerschueren/decode-uri-component
++// MIT-licensed decode-uri-component 0.5.1 linear decoder backport.
++// Keep the 0.2.x CommonJS export and literal plus-to-space convention.
++// Upstream: https://github.com/SamVerschueren/decode-uri-component
  
 -function decodeComponents(components, split) {
 -	try {
@@ -26,17 +25,23 @@ diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-ur
 +function parsePercentByte(input, position) {
 +	if (input.codePointAt(position) !== 37 || position + 3 > input.length) {
 +		return;
-+	}
-+
+ 	}
+ 
+-	if (components.length === 1) {
+-		return components;
 +	const digits = input.slice(position + 1, position + 3);
 +
 +	if (!hexPair.test(digits)) {
 +		return;
-+	}
-+
+ 	}
+ 
+-	split = split || 1;
 +	return {byte: Number.parseInt(digits, 16), next: position + 3};
 +}
-+
+ 
+-	// Split the array in 2 parts
+-	var left = components.slice(0, split);
+-	var right = components.slice(split);
 +/**
 + * Return how many bytes a UTF-8 code point needs based on its lead byte.
 + * Returns 0 for continuation bytes and other invalid lead bytes.
@@ -49,26 +54,20 @@ diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-ur
 +	// Start at 0xC2 to exclude overlong 2-byte encodings (0xC0/0xC1).
 +	if (byte >= 0xC2 && byte <= 0xDF) {
 +		return 2;
- 	}
++	}
  
--	if (components.length === 1) {
--		return components;
+-	return Array.prototype.concat.call([], decodeComponents(left), decodeComponents(right));
 +	if (byte >= 0xE0 && byte <= 0xEF) {
 +		return 3;
- 	}
- 
--	split = split || 1;
++	}
++
 +	if (byte >= 0xF0 && byte <= 0xF4) {
 +		return 4;
 +	}
- 
--	// Split the array in 2 parts
--	var left = components.slice(0, split);
--	var right = components.slice(split);
++
 +	return 0;
 +}
- 
--	return Array.prototype.concat.call([], decodeComponents(left), decodeComponents(right));
++
 +function isContinuationByte(byte) {
 +	return byte >= 0x80 && byte <= 0xBF;
  }
@@ -78,7 +77,7 @@ diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-ur
 + *Scans left-to-right in O(n), decoding valid UTF-8 runs and leaving the rest literal.
 + */
  function decode(input) {
- 	try {
+@@ -29,63 +62,93 @@
  		return decodeURIComponent(input);
 -	} catch (err) {
 -		var tokens = input.match(singleMatcher) || [];
@@ -92,27 +91,57 @@ diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-ur
 +				position++;
 +				continue;
 +			}
-+
-+			const firstByte = parsePercentByte(input, position);
  
 -		for (var i = 1; i < tokens.length; i++) {
 -			input = decodeComponents(tokens, i).join('');
++			const firstByte = parsePercentByte(input, position);
+ 
+-			tokens = input.match(singleMatcher) || [];
+-		}
 +			// `%` not followed by two hex digits (e.g. `%` or `%G`).
 +			if (!firstByte) {
 +				output += input.charAt(position);
 +				position++;
 +				continue;
 +			}
-+
+ 
+-		return input;
+-	}
+-}
 +			const sequenceLength = utf8SequenceLength(firstByte.byte);
-+
+ 
+-function customDecodeURIComponent(input) {
+-	// Keep track of all the replacements and prefill the map with the `BOM`
+-	var replaceMap = {
+-		'%FE%FF': '\uFFFD\uFFFD',
+-		'%FF%FE': '\uFFFD\uFFFD'
+-	};
+-
+-	var match = multiMatcher.exec(input);
+-	while (match) {
+-		try {
+-			// Decode as big chunks as possible
+-			replaceMap[match[0]] = decodeURIComponent(match[0]);
+-		} catch (err) {
+-			var result = decode(match[0]);
 +			// Continuation byte or invalid lead byte — emit one `%XX` literally.
 +			if (sequenceLength === 0) {
++				const pair = input.slice(position, position + 6);
++
++				// UTF-16 BOM byte pairs become two replacement characters.
++				if (pair === '%FE%FF' || pair === '%FF%FE') {
++					output += '\uFFFD\uFFFD';
++					position += 6;
++					continue;
++				}
++
 +				output += input.slice(position, position + 3);
 +				position += 3;
 +				continue;
 +			}
-+
+ 
+-			if (result !== match[0]) {
+-				replaceMap[match[0]] = result;
 +			let end = firstByte.next;
 +			let validSequence = true;
 +
@@ -125,8 +154,11 @@ diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-ur
 +				}
 +
 +				end = nextByte.next;
-+			}
-+
+ 			}
+-		}
+ 
+-		match = multiMatcher.exec(input);
+-	}
 +			if (validSequence) {
 +				const encodedSequence = input.slice(position, end);
 +
@@ -139,56 +171,29 @@ diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-ur
 +				}
 +			}
  
--			tokens = input.match(singleMatcher) || [];
+-	// Add `%C2` at the end of the map to make sure it does not replace the combinator before everything else
+-	replaceMap['%C2'] = '\uFFFD';
 +			// Missing continuation bytes or decode failure — emit the first byte literally.
-+			output += input.slice(position, position + 3);
-+			position += 3;
- 		}
- 
--		return input;
-+		return output;
- 	}
- }
- 
- function customDecodeURIComponent(input) {
- 	// Keep track of all the replacements and prefill the map with the `BOM`
--	var replaceMap = {
-+	const replaceMap = {
- 		'%FE%FF': '\uFFFD\uFFFD',
--		'%FF%FE': '\uFFFD\uFFFD'
-+		'%FF%FE': '\uFFFD\uFFFD',
- 	};
- 
--	var match = multiMatcher.exec(input);
-+	// Find percent-encoded runs separated by literal text or lone `%` characters.
-+	let match = multiMatcher.exec(input);
-+
- 	while (match) {
- 		try {
- 			// Decode as big chunks as possible
- 			replaceMap[match[0]] = decodeURIComponent(match[0]);
--		} catch (err) {
--			var result = decode(match[0]);
-+		} catch {
-+			const result = decode(match[0]);
- 
- 			if (result !== match[0]) {
- 				replaceMap[match[0]] = result;
-@@ -66,29 +152,28 @@
- 	// Add `%C2` at the end of the map to make sure it does not replace the combinator before everything else
- 	replaceMap['%C2'] = '\uFFFD';
++			const literal = input.slice(position, position + 3);
  
 -	var entries = Object.keys(replaceMap);
-+	const entries = Object.keys(replaceMap);
++			// A truncated `%C2` becomes a replacement character.
++			output += literal === '%C2' ? '\uFFFD' : literal;
++			position += 3;
++		}
  
 -	for (var i = 0; i < entries.length; i++) {
-+	for (const key of entries) {
- 		// Replace all decoded components
+-		// Replace all decoded components
 -		var key = entries[i];
- 		input = input.replace(new RegExp(key, 'g'), replaceMap[key]);
+-		input = input.replace(new RegExp(key, 'g'), replaceMap[key]);
++		return output;
  	}
++}
  
- 	return input;
+-	return input;
++function customDecodeURIComponent(input) {
++	// Decode each percent-encoded run in place in a single pass. Decoded output is never rescanned.
++	return input.replace(multiMatcher, run => decode(run));
  }
  
 -module.exports = function (encodedURI) {
@@ -198,17 +203,16 @@ diff --git a/node_modules/decode-uri-component/index.js b/node_modules/decode-ur
 +		throw new TypeError(`Expected \`encodedURI\` to be of type \`string\`, got \`${typeof encodedURI}\``);
  	}
  
--	try {
--		encodedURI = encodedURI.replace(/\+/g, ' ');
 +	encodedURI = encodedURI.replace(/\+/g, ' ');
- 
-+	try {
+ 	try {
+-		encodedURI = encodedURI.replace(/\+/g, ' ');
+-
  		// Try the built in decoder first
  		return decodeURIComponent(encodedURI);
 -	} catch (err) {
 +	} catch {
  		// Fallback to a more advanced decoder
- 		return customDecodeURIComponent(encodedURI);
+@@ -93,2 +156,2 @@
  	}
 -};
 +}

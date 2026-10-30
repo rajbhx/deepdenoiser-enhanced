@@ -99,6 +99,9 @@ jobs:
           javac -d "$RUNNER_TEMP/dd-pcm" modules/AudioProcessorModule/android/src/main/java/expo/modules/audioprocessormodule/PcmIntegrity.java tests/PcmIntegrityTest.java
           java -cp "$RUNNER_TEMP/dd-pcm" PcmIntegrityTest
 
+      - name: Non-overwriting promotion and trim-edge regression (actual Java implementation)
+        run: bun run test:jvm-safety
+
       - name: Native incoming-share FIFO regression (actual JVM implementation)
         run: |
           mkdir -p "$RUNNER_TEMP/dd-share"
@@ -211,7 +214,7 @@ jobs:
           TMP=$(mktemp -d)
           unzip -q "$BINARY" "$PATTERN" -d "$TMP"
           find "$TMP" -name '*.dex' -print0 | xargs -0 -r strings > "$TMP/dex-strings.txt"
-          for SYMBOL in cancelPendingPick copyFileWithSha256 atomicReplaceFile exportMediaFile getContentDisplayName fingerprintFile isWriterActive DD_FS_SHORT_READ STOP_TIMEOUT getShareIntentGeneration acknowledgeShareIntent takeShareQueueOverflow ShareIntentQueue getDiagnosticsInfo readDiagnosticHistory writeDiagnosticHistory deleteDiagnosticHistory; do
+          for SYMBOL in cancelPendingPick copyFileWithSha256 atomicReplaceFile exportMediaFile getContentDisplayName fingerprintFile isWriterActive hasRecordingError recordingFailed linkPrivateFileNoReplace DD_FS_SHORT_READ STOP_TIMEOUT getShareIntentGeneration acknowledgeShareIntent takeShareQueueOverflow ShareIntentQueue getDiagnosticsInfo readDiagnosticHistory writeDiagnosticHistory deleteDiagnosticHistory; do
             grep -Fq "$SYMBOL" "$TMP/dex-strings.txt" || { echo "::error::$SYMBOL missing from DEX"; exit 1; }
             echo "OK: $SYMBOL present in DEX"
           done

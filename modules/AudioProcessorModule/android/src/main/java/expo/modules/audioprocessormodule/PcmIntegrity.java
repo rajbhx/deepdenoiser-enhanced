@@ -78,6 +78,52 @@ public final class PcmIntegrity {
         return (short) (lo | (hi << 8));
     }
 
+    /**
+     * Copy inclusive kept segments, fading only real cut boundaries. Overlapping
+     * short fades use the smaller gain, so both ends still reach zero. Original
+     * samples and total output length otherwise remain unchanged.
+     */
+    public static void copyTrimmedSegments(InputStream input, OutputStream output,
+            long[] starts, long[] ends, long totalSamples, int sampleRate) throws IOException {
+        if (starts == null || ends == null || starts.length == 0 || starts.length != ends.length ||
+                totalSamples <= 0 || sampleRate <= 0) throw new IOException("Invalid trim ranges");
+        long previousEnd = -1;
+        for (int i = 0; i < starts.length; i++) {
+            if (starts[i] <= previousEnd || ends[i] < starts[i] || ends[i] >= totalSamples) {
+                throw new IOException("Invalid or overlapping trim ranges");
+            }
+            previousEnd = ends[i];
+        }
+        int fadeSamples = Math.min(240, Math.max(1, sampleRate / 200));
+        int denominator = Math.max(1, fadeSamples - 1);
+        previousEnd = -1;
+        for (int index = 0; index < starts.length; index++) {
+            long start = starts[index], end = ends[index], length = end - start + 1;
+            skipExactly(input, (start - previousEnd - 1) * 2);
+            boolean fadeIn = start > previousEnd + 1;
+            boolean fadeOut = index + 1 < starts.length ? starts[index + 1] > end + 1 : end < totalSamples - 1;
+            long head = fadeIn ? Math.min(length, (long) fadeSamples) : 0;
+            long tailStart = fadeOut ? Math.max(0, length - fadeSamples) : length;
+            long sampleIndex = 0;
+            while (sampleIndex < length) {
+                if (sampleIndex >= head && sampleIndex < tailStart) {
+                    long count = tailStart - sampleIndex;
+                    copyExactly(input, output, count * 2);
+                    sampleIndex += count;
+                    continue;
+                }
+                int gain = denominator;
+                if (fadeIn) gain = (int) Math.min(gain, sampleIndex);
+                if (fadeOut) gain = (int) Math.min(gain, length - 1 - sampleIndex);
+                int value = readInt16(input) * gain / denominator;
+                output.write(value & 0xff);
+                output.write((value >> 8) & 0xff);
+                sampleIndex++;
+            }
+            previousEnd = end;
+        }
+    }
+
     public interface FrameConsumer { void accept(double rmsDb); }
 
     /**

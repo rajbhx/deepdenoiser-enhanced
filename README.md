@@ -1,12 +1,12 @@
-# DeepDenoiser Enhanced 2.0.5
+# DeepDenoiser Enhanced 2.0.6
 
 Offline AI audio and video denoising for Android using **DeepFilterNet3** and **ONNX Runtime**. This is a privacy-focused fork of [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser).
 
-**Current audit:** [2.0.4 audit and source cleanup](docs/AUDIT_2026-10-29.md) documents two still-open recording-recovery and optional silence-trim risks, device-test gaps and dependency findings. The earlier cleanup itself did not create an APK.
+## 2.0.6 test-build candidate
 
-## Live model view (2.0.5 test update)
+This candidate simplifies About and results, removes the Live Model View without removing denoising, and implements the five 2.0.5 audit fixes. The recorder warns about worker failures, mismatched recordings are only repaired as separate copies, imported copies are verified before reuse, finalization stages are more specific, and URI-decoder and Trim Silence cut-edge fixes have host regression coverage. See [audit-fix details and limitations](docs/2.0.5-audit-source-fixes.md).
 
-The recorder can display actual, sample-aligned input and cleaned-output frequency activity, the change between them, successful model frame count, and approximate queued audio. This is an independent display analysis—not the model's internal reasoning or a noise-only meter. It can be hidden and suspends while backgrounded; skipped analysis is shown as blank rather than invented. Queue errors/overload now surface on screen, a failed model load offers Retry, and Android window/native-stack backgrounds are set dark for the reported transition flash. The model, inference arithmetic, format and recovery implementation are unchanged. See [live view design, limits and tests](docs/LIVE_MODEL_VIEW.md). Real OnePlus performance, installation, flash and background behavior still require device testing.
+The bundled model and denoising arithmetic are unchanged. A GitHub Actions build and host tests do not replace Android/OnePlus tests: recovery, Back navigation, upgrade, recording interruptions, Trim Silence audio quality and background behavior still need verification. The [2.0.5 live view notes](docs/LIVE_MODEL_VIEW.md) describe the previous build only. Test APKs are debug-signed and are not production releases.
 
 ## Quality-preserving optimization (2.0.4 testing build)
 

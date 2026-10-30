@@ -27,6 +27,7 @@ class File {
   async text() { return fs.promises.readFile(filePath(this), 'utf8'); }
   textSync() { return fs.readFileSync(filePath(this), 'utf8'); }
   async write(data) { await fs.promises.writeFile(filePath(this), data); }
+  create() { fs.closeSync(fs.openSync(filePath(this), 'wx')); }
   delete() { fs.unlinkSync(filePath(this)); }
   async move(dest, options) { if (dest.exists && !options?.overwrite) throw new Error('exists'); await fs.promises.rename(filePath(this),filePath(dest)); this.uri=dest.uri; }
   async copy(dest) { if (dest.exists) throw new Error('exists'); await fs.promises.copyFile(filePath(this),filePath(dest)); }
@@ -49,7 +50,8 @@ const cacheApi = load('denoiseCache', {
     const bytes=await fs.promises.readFile(filePath(source));
     await fs.promises.writeFile(filePath(dest),bytes);
     return crypto.createHash('sha256').update(bytes).digest('hex');
-  }, fingerprintFile:async source=>{const bytes=await fs.promises.readFile(filePath(source));return {bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')}}},
+  }, fingerprintFile:async source=>{const bytes=await fs.promises.readFile(filePath(source));return {bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')}},
+  linkPrivateFileNoReplace:async (src,dst)=>{try {await fs.promises.link(filePath(src),filePath(dst));return true} catch(e){if(e.code==='EEXIST')return false;throw e}}},
   './denoiserSingleton':{isProcessingMedia:()=>activeRun},
   'expo-file-system':stubFs,
   './formatHandler':{sanitizeFileName:s=>s.replace(/[^a-zA-Z0-9._-]/g,'_') || 'denoised'},
@@ -67,6 +69,31 @@ const cacheApi = load('denoiseCache', {
   assert.ok(!fs.readdirSync(filePath(importDir)).some(n=>n.startsWith('_pending_')),'no partial imports');
   assert.notEqual(cacheApi.buildInputIdentity(first),cacheApi.buildInputIdentity(second));
   console.log('PASS full-content import identity prevents same-name/same-size collision');
+
+  // The digest-named original can be damaged without changing its length.
+  // Reimport must never reuse or overwrite it; a separately verified copy wins.
+  await first.write('zzzz'); let corruptionWarnings=0;
+  const repairedImport=await cacheApi.importToDocuments(a.uri,'same.wav',undefined,'audio',()=>corruptionWarnings++);
+  assert.notEqual(repairedImport.uri,first.uri);assert.equal(await first.text(),'zzzz');
+  assert.equal(await repairedImport.text(),'aaaa');assert.equal(corruptionWarnings,1);
+  const again=await cacheApi.importToDocuments(a.uri,'same.wav',undefined,'audio',()=>corruptionWarnings++);
+  assert.equal(again.uri,repairedImport.uri,'a previously verified alternate may be reused only after hashing');
+  assert.equal(corruptionWarnings,2);assert.equal(await first.text(),'zzzz');
+  // Competing promotions into one absent name use an atomic no-replace link.
+  const raceSource=new File(root,'concurrent.wav');await raceSource.write('concurrent bytes');
+  const winners=await Promise.all(Array.from({length:32},()=>cacheApi.importToDocuments(raceSource.uri,'race.wav')));
+  assert.equal(new Set(winners.map(f=>f.uri)).size,1);
+  assert.equal(await winners[0].text(),'concurrent bytes');
+  assert.ok(!fs.readdirSync(filePath(importDir)).some(n=>n.startsWith('_pending_')));
+
+  const longName='x'.repeat(166)+'.wav',longSource=new File(root,'long.wav');await longSource.write('long-data');
+  const longOriginal=await cacheApi.importToDocuments(longSource.uri,longName);await longOriginal.write('broken---');
+  const longAlternate=await cacheApi.importToDocuments(longSource.uri,longName);await longAlternate.write('bad------');
+  const thirdLong=await cacheApi.importToDocuments(longSource.uri,longName);
+  assert.equal(await thirdLong.text(),'long-data');assert.equal(await longOriginal.text(),'broken---');assert.equal(await longAlternate.text(),'bad------');
+  assert.ok(thirdLong.name.length<=255,'recovered names must fit ordinary Android filename limits');
+  console.log('PASS corrupted imports are retained, separately reimported, verified on reuse, and concurrent promotions never replace');
+
 
   assert.equal(cacheApi.readImportedMediaKind(first), null, 'legacy imports are explicitly unknown');
   await cacheApi.setImportedMediaKind(first, 'video');

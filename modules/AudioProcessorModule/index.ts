@@ -81,6 +81,11 @@ export async function copyFileWithSha256(sourceUri: string, destUri: string): Pr
   return AudioProcessorModule.copyFileWithSha256(sourceUri, destUri);
 }
 
+/** Atomically publish a completed file without replacing an existing private file. */
+export async function linkPrivateFileNoReplace(sourceUri: string, targetUri: string): Promise<boolean> {
+  return await AudioProcessorModule.linkPrivateFileNoReplace(sourceUri, targetUri);
+}
+
 /** Stream a file's content hash and length on the native IO dispatcher. */
 export async function fingerprintFile(sourceUri: string): Promise<{ sha256: string; bytes: number }> {
   return await AudioProcessorModule.fingerprintFile(sourceUri);

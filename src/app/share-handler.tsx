@@ -38,8 +38,11 @@ export default function ShareHandler() {
     void (async () => {
       try {
         recordDiagnostic("share", "share", "START");
+        let damagedImport = false;
         const selection = await importSharedMedia(payloads,
-          (current, total) => setLabel(`Importing shared file ${current} of ${total}…`));
+          (current, total) => setLabel(`Importing shared file ${current} of ${total}…`),
+          () => { damagedImport = true; });
+        if (damagedImport) Alert.alert("Older import failed verification", "An older private copy could not be verified and was not overwritten. A separate verified copy was selected. Check Your files for both copies.");
         navigatingFromShare.current = true;
         recordDiagnostic("share", "share", "OK");
         consume(payloads, generation);

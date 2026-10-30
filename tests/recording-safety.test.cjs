@@ -9,8 +9,8 @@ class File {
   constructor(...parts) { this.uri=path.join(...parts.map(p=>typeof p==='string'?p:p.uri)); }
   get exists(){return fs.existsSync(this.uri)}
   get size(){return this.exists?fs.statSync(this.uri).size:0}
-  open(){
-    const fd=fs.openSync(this.uri,'r+');
+  open(mode){
+    const fd=fs.openSync(this.uri,mode==='r'?'r':'r+');
     return {offset:0, readBytes(n){const b=Buffer.alloc(n);const got=fs.readSync(fd,b,0,n,this.offset);this.offset+=got;return new Uint8Array(b.buffer,b.byteOffset,got)},
       writeBytes(b){fs.writeSync(fd,b,0,b.length,this.offset);this.offset+=b.length},close(){fs.closeSync(fd)}};
   }
@@ -24,7 +24,7 @@ function load(name, stubs={}) {
   mod._compile(js,filename);return mod.exports;
 }
 let recorderStatus={isRecording:false,isPaused:false,isWriterActive:false};
-const safety=load('recordingSafety',{'expo-file-system':{File,Directory,Paths:{document:{uri:root}}},
+const safety=load('recordingSafety',{'expo-file-system':{File,Directory,FileMode:{ReadOnly:'r'},Paths:{document:{uri:root}}},
   '@siteed/audio-studio':{AudioStudioModule:{status:()=>recorderStatus}}});
 const {AlignedDenoiseStream}=load('alignedDenoiseStream');
 function wav(samples, finalized=false){
@@ -40,6 +40,16 @@ function wav(samples, finalized=false){
   ]) { recorderStatus=status; assert.throws(()=>safety.assertNativeRecorderIdle(),/recorder|confirm/i); }
   recorderStatus={isRecording:false,isPaused:false,isWriterActive:false};
   safety.assertNativeRecorderIdle();
+  const uri='file:///data/recordings/a.wav';
+  assert.equal(safety.isRecordingFailureEvent({reason:'recordingFailed',fileUri:'file:/data/recordings/a.wav'},uri),true);
+  assert.equal(safety.isRecordingFailureEvent({reason:'recordingFailed',fileUri:'file:///data/recordings/old.wav'},uri),false);
+  assert.equal(safety.isRecordingFailureEvent({reason:'recordingStopped',fileUri:uri},uri),false);
+  assert.equal(safety.isRecordingWorkerFailed({isRecording:true,isWriterActive:false,fileUri:uri},uri),true);
+  assert.equal(safety.isRecordingWorkerFailed({isRecording:true,isWriterActive:true,hasRecordingError:true,fileUri:uri},uri),true);
+  assert.equal(safety.isRecordingWorkerFailed({isRecording:false,isWriterActive:false,hasRecordingError:true,fileUri:uri},uri),false);
+  assert.equal(safety.isRecordingWorkerFailed({isRecording:true,isWriterActive:false,fileUri:'file:///old.wav'},uri),false);
+  assert.equal(safety.isRecordingWorkerFailed({isRecording:true,isWriterActive:true,fileUri:uri},uri),false);
+  console.log('PASS fatal worker events and status checks ignore stale sessions and normal Stop');
   console.log('PASS recording recovery fails closed for paused, active and timed-out native writers');
   let unblock;
   const gate=new Promise(resolve=>{unblock=resolve});const seen=[];
@@ -72,11 +82,29 @@ function wav(samples, finalized=false){
   assert.equal(warned,1);assert.equal(listenerFailure.error,null,'a broken status observer must not fail the audio work');
   console.log('PASS queue exposes bounded in-flight statistics and reports async failures without relying on the UI');
 
+  let releaseBacklog;const backlogGate=new Promise(resolve=>{releaseBacklog=resolve}),changes=[],ordered=[];
+  const backlog=new safety.BoundedRecordingQueue(10,20,async chunk=>{await backlogGate;ordered.push(chunk.length)},undefined,
+    {thresholdSamples:5,onChange:behind=>changes.push(behind)});
+  backlog.enqueue(new Float32Array(3));assert.deepEqual(changes,[]);
+  backlog.enqueue(new Float32Array(2));backlog.enqueue(new Float32Array(1));assert.deepEqual(changes,[true]);
+  releaseBacklog();await backlog.drain();assert.deepEqual(changes,[true,false]);assert.deepEqual(ordered,[3,2,1]);
+  let backlogWarnings=0;console.warn=()=>{backlogWarnings++};
+  const brokenBacklog=new safety.BoundedRecordingQueue(2,10,async()=>{},undefined,{thresholdSamples:2,onChange:()=>{throw new Error('broken warning UI')}});
+  brokenBacklog.enqueue(new Float32Array(2));await brokenBacklog.drain();console.warn=oldWarn;
+  assert.equal(backlogWarnings,2);assert.equal(brokenBacklog.error,null,'warning errors must never fail audio processing');
+  assert.equal(brokenBacklog.snapshot().pendingSamples,0);
+  console.log('PASS backlog warnings cross thresholds without polling and observer failures leave audio work intact');
+
   const samples=Array.from({length:5009},(_,i)=>((i*311)%50000)-25000);
   const native=new File(root,'original.wav'),prefix=new File(root,'prefix.pcm');
-  fs.writeFileSync(native.uri,wav(samples));
+  const interrupted=wav(samples); fs.writeFileSync(native.uri,interrupted);
   const full=fs.readFileSync(native.uri).subarray(44); const prefixBytes=2186;
   fs.writeFileSync(prefix.uri,full.subarray(0,prefixBytes));
+  assert.equal(safety.inspectRecordingWavHeader(native).needsRepair,true);
+  assert.throws(()=>safety.ensureRecordingWavHeader(native),safety.RecordingHeaderMismatchError);
+  await assert.rejects(()=>safety.reconcileRecording(native,prefix,async()=>{}),safety.RecordingHeaderMismatchError);
+  assert.deepEqual(fs.readFileSync(native.uri),interrupted,'inspection and reconciliation must not rewrite the original');
+  fs.writeFileSync(native.uri,wav(samples,true));
   const recovered=[];
   assert.equal(await safety.reconcileRecording(native,prefix,async chunk=>recovered.push(...chunk)),true);
   assert.equal(recovered.length,(full.length-prefixBytes)/2);
@@ -84,7 +112,7 @@ function wav(samples, finalized=false){
   const repaired=fs.readFileSync(native.uri);
   assert.equal(repaired.readUInt32LE(4),repaired.length-8);assert.equal(repaired.readUInt32LE(40),full.length);
   assert.deepEqual(repaired.subarray(44),full,'WAV header recovery must not alter any samples');
-  console.log('PASS native WAV repairs interrupted header and restores the unstreamed final chunk');
+  console.log('PASS mismatched native WAV is untouched; finalized WAV restores the unstreamed final chunk');
 
   const bad=Buffer.from(full.subarray(0,prefixBytes));bad[21]^=1;fs.writeFileSync(prefix.uri,bad);let called=false;
   assert.equal(await safety.reconcileRecording(native,prefix,async()=>{called=true}),false);assert.equal(called,false);

@@ -34,6 +34,7 @@ async function describePayload(payload: SharePayload, index: number): Promise<{ 
 export async function importSharedMedia(
   payloads: readonly SharePayload[],
   onProgress: (current: number, total: number) => void = () => {},
+  onDamagedExistingCopy: () => void = () => {},
 ): Promise<SelectedMedia[]> {
   if (!payloads.length) throw new Error("No shared audio or video was received.");
   // Bound raw work before provider queries, including pathological duplicate lists.
@@ -60,7 +61,7 @@ export async function importSharedMedia(
     const item = unique[i];
     onProgress(i + 1, unique.length);
     try {
-      const imported = await importToDocuments(item.uri, item.name, undefined, item.kind);
+      const imported = await importToDocuments(item.uri, item.name, undefined, item.kind, onDamagedExistingCopy);
       if (!seen.has(imported.uri)) {
         seen.add(imported.uri);
         selection.push({ uri: imported.uri, name: item.name, kind: readImportedMediaKind(imported) ?? item.kind });

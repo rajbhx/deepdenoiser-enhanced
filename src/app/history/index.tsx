@@ -8,7 +8,8 @@ import { clearRebuildableCache, getRebuildableCacheBytes, placeOutput, removeImp
 import { PCMtoWav } from "@/src/scripts/formatHandler";
 import { type MediaKind, type SelectedMedia } from "@/src/scripts/mediaSelection";
 import { listPrivateMedia, type PrivateMedia, type PrivateMediaGroup } from "@/src/scripts/privateMedia";
-import { assertNativeRecorderIdle, ensureRecordingWavHeader } from "@/src/scripts/recordingSafety";
+import { assertNativeRecorderIdle, ensureRecordingWavHeader, RecordingHeaderMismatchError } from "@/src/scripts/recordingSafety";
+import { repairRecordingCopy } from "@/src/scripts/recordingRecovery";
 import Feather from "@expo/vector-icons/Feather";
 import { useRouter } from "expo-router";
 import { useFocusEffect } from "expo-router/react-navigation";
@@ -35,6 +36,9 @@ export default function HistoryScreen() {
   const [group, setGroup] = useState<PrivateMediaGroup>("results");
   const [selected, setSelected] = useState<string | null>(null);
   const [openError, setOpenError] = useState("");
+  const [headerMismatch, setHeaderMismatch] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const repairLock = useRef(false);
   const [cacheBytes, setCacheBytes] = useState<number | null>(null);
   const [clearing, setClearing] = useState(false);
   const clearLock = useRef(false);
@@ -57,12 +61,15 @@ export default function HistoryScreen() {
     if (item.group === "recordings" && !item.partial) ensureRecordingWavHeader(item.file);
   };
   const open = (item: PrivateMedia) => {
-    if (selected === item.file.uri) { setSelected(null); setOpenError(""); return; }
+    if (selected === item.file.uri) { setSelected(null); setOpenError(""); setHeaderMismatch(false); return; }
     // Expand even when validation fails: deletion must remain reachable, but
     // preview/export stay blocked and deletion independently checks writer idle.
     setSelected(item.file.uri);
-    try { prepareFile(item); setOpenError(""); }
-    catch (error) { setOpenError(error instanceof Error ? error.message : String(error)); }
+    try { prepareFile(item); setOpenError(""); setHeaderMismatch(false); }
+    catch (error) {
+      setHeaderMismatch(error instanceof RecordingHeaderMismatchError);
+      setOpenError(error instanceof Error ? error.message : String(error));
+    }
   };
   const remove = (item: PrivateMedia) => {
     Alert.alert("Delete private copy?", `${item.name}\n\nThis removes the app's private copy. It does not delete files you exported to your device.`, [
@@ -104,6 +111,24 @@ export default function HistoryScreen() {
             await placeOutput(wav.file, `recovered_${Date.now()}_partial_original.wav`);
             setSelected(null); setGroup("results"); refresh();
           } catch (error) { Alert.alert("Could not recover backup", error instanceof Error ? error.message : String(error)); }
+        })();
+      } },
+    ]);
+  };
+  const recoverHeader = (item: PrivateMedia) => {
+    if (repairLock.current) return;
+    Alert.alert("Repair a separate copy?", "The recording header and file length do not match. Audio may be missing; a header repair cannot restore it. The original will remain unchanged and a separate copy will be saved in Results.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Repair copy", onPress: () => {
+        if (repairLock.current) return;
+        repairLock.current = true; setRepairing(true);
+        void (async () => {
+          try {
+            await repairRecordingCopy(item.file, assertSafe);
+            setSelected(null); setOpenError(""); setHeaderMismatch(false); setGroup("results"); refresh();
+            Alert.alert("Repaired copy saved", "The copy is in Results. Audio may still be missing; the original was kept unchanged in Recordings.");
+          } catch (error) { Alert.alert("Could not repair copy", error instanceof Error ? error.message : String(error)); }
+          finally { repairLock.current = false; setRepairing(false); }
         })();
       } },
     ]);
@@ -168,7 +193,7 @@ export default function HistoryScreen() {
             <Feather name={expanded ? "chevron-up" : "chevron-down"} size={20} color={theme.COLORS.subtext} />
           </TouchableOpacity>
           {expanded && <View style={styles.expanded}>
-            {!!openError && <Text accessibilityRole="alert" style={styles.error}>Cannot preview this file: {openError} You can still request deletion below.</Text>}
+            {!!openError && <Text accessibilityRole="alert" style={styles.error}>Cannot preview this file: {openError} You can share the original as-is or delete it below.</Text>}
             {!openError && item.group === "imports" && <View style={styles.kindSection}>
               <Text style={styles.note}>{item.kindKnown ? "Media type (change if incorrect):" : "Choose the media type before previewing or denoising this older import:"}</Text>
               <View style={styles.kindRow}>
@@ -182,6 +207,11 @@ export default function HistoryScreen() {
             {!openError && (item.partial ? <Text style={styles.note}>This cache backup can be incomplete and may be removed by Android. Recover it to Results before relying on it.</Text>
               : !item.kindKnown ? null : item.video ? <VideoPlayer uri={item.file.uri} name={item.name} /> : <AudioPlayer uri={item.file.uri} name={item.name} />)}
             <View style={styles.actions}>
+              {headerMismatch && !!openError && <TouchableOpacity accessibilityRole="button" disabled={repairing}
+                accessibilityState={{ disabled: repairing }} onPress={() => recoverHeader(item)} style={styles.action}>
+                <Feather name="refresh-cw" size={17} color={theme.COLORS.primary} /><Text style={styles.actionText}>{repairing ? "Repairing…" : "Repair copy"}</Text>
+              </TouchableOpacity>}
+              {!!openError && !item.partial && <ShareBtn uri={item.file.uri} accessibilityLabel="Share original as-is" beforeShare={assertSafe} />}
               {!openError && item.partial && <TouchableOpacity accessibilityRole="button" onPress={() => recoverPartial(item)} style={styles.action}>
                 <Feather name="refresh-cw" size={17} color={theme.COLORS.primary} /><Text style={styles.actionText}>Recover WAV</Text>
               </TouchableOpacity>}

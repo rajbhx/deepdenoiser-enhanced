@@ -11,8 +11,9 @@ import {
 interface ShareBtnProps {
     uri: string;
     beforeShare?: () => void;
+    accessibilityLabel?: string;
 }
-const ShareBtn: React.FC<ShareBtnProps> = ({ uri, beforeShare }) => {
+const ShareBtn: React.FC<ShareBtnProps> = ({ uri, beforeShare, accessibilityLabel = "Share file" }) => {
     const handleShare = async () => {
         try {
             beforeShare?.();
@@ -30,7 +31,7 @@ const ShareBtn: React.FC<ShareBtnProps> = ({ uri, beforeShare }) => {
 
     return <TouchableOpacity
         accessibilityRole="button"
-        accessibilityLabel="Share file"
+        accessibilityLabel={accessibilityLabel}
         style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}
         onPress={handleShare}
         activeOpacity={0.7}

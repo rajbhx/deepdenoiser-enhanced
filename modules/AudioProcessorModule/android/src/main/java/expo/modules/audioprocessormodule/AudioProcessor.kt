@@ -835,14 +835,16 @@ class MediaProcessor(private val context: Context) : Closeable {
                                 byteRate,
                                 bitDepth
                         )
-                        if (trimSegments != null && trimSegments.size > 1) {
-                            copyTrimmedSegments(
+                        if (trimmed && trimSegments != null) {
+                            // Single and multiple segments both need cut-edge fades.
+                            // Use the complete source length, not the last kept sample.
+                            PcmIntegrity.copyTrimmedSegments(
                                     inputStream,
                                     outputStream,
-                                    trimSegments,
-                                    trimEndSample + 1,
-                                    sampleRate,
-                                    trimmed
+                                    trimSegments.map { it.first }.toLongArray(),
+                                    trimSegments.map { it.second }.toLongArray(),
+                                    pcmDataLength / 2,
+                                    sampleRate
                             )
                         } else {
                             PcmIntegrity.skipExactly(inputStream, trimStartSample * 2)
@@ -959,58 +961,6 @@ class MediaProcessor(private val context: Context) : Closeable {
             segments.add(runStart to (frameCount - 1).toLong())
         }
         return segments
-    }
-
-    /**
-     * Writes [segments] (absolute sample ranges, inclusive) back-to-back, skipping
-     * removed pauses. This multi-segment path can apply short linear fades, but
-     * not every outer cut is currently faded; see docs/AUDIT_2026-10-29.md.
-     */
-    private fun copyTrimmedSegments(
-            input: InputStream,
-            output: OutputStream,
-            segments: List<Pair<Long, Long>>,
-            totalSamples: Long,
-            sampleRate: Int,
-            trimmed: Boolean
-    ) {
-        val fadeSamples = min(240, max(1, sampleRate / 200)) // 5 ms
-        var prevEndSample = -1L
-        for ((segIndex, seg) in segments.withIndex()) {
-            val startSample = seg.first
-            val endSample = seg.second
-
-            // Skip the removed pause before this segment.
-            PcmIntegrity.skipExactly(input, (startSample - prevEndSample - 1) * 2)
-
-            val segLen = endSample - startSample + 1
-            val fadeInLen =
-                    if (trimmed && (segIndex > 0 || startSample > 0)) {
-                        min(fadeSamples.toLong(), segLen).toInt()
-                    } else 0
-            val fadeOutLen =
-                    if (trimmed && (segIndex < segments.size - 1 || endSample < totalSamples - 1)) {
-                        min(fadeSamples.toLong(), segLen - fadeInLen).toInt()
-                    } else 0
-
-            // Fade-in region (sample-granular so we can ramp).
-            for (k in 1..fadeInLen) {
-                writeInt16Sample(output, (PcmIntegrity.readInt16(input) * k) / fadeInLen)
-            }
-            // Bulk middle: an early EOF is failure, never implicit silence.
-            PcmIntegrity.copyExactly(input, output, (segLen - fadeInLen - fadeOutLen) * 2)
-            // Fade-out region.
-            for (k in fadeOutLen downTo 1) {
-                writeInt16Sample(output, (PcmIntegrity.readInt16(input) * k) / fadeOutLen)
-            }
-            prevEndSample = endSample
-        }
-    }
-
-    private fun writeInt16Sample(output: OutputStream, v: Int) {
-        val s = v.coerceIn(-32768, 32767)
-        output.write(s and 0xff)
-        output.write((s shr 8) and 0xff)
     }
 
     private fun writeWavHeader(

@@ -1,0 +1,2 @@
+# Unified dependency patches must retain upstream context whitespace verbatim.
+patches/*.patch whitespace=-blank-at-eol,-space-before-tab

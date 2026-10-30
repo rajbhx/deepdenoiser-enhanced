@@ -192,16 +192,35 @@ export default function ProcessScreen() {
           ))}
         </View>}
 
-        <View style={styles.card}>
+        {output && <View style={styles.result}>
+          <View style={styles.cardHeader}>
+            <Text style={styles.resultTitle}>Cleaned file</Text>
+            <Text style={styles.muted}>{current.cached ? "Cached result" : `Processed in ${duration(current.seconds ?? 0)}`}</Text>
+          </View>
+          <Text numberOfLines={1} style={styles.originalName}>{current.name}</Text>
+          {current.kind === "video" ? <VideoPlayer key={output.uri} uri={output.uri} name={output.name} />
+            : current.trimEnabled ? <><Text style={styles.helper}>Silence trimming changes the timeline, so synchronized comparison is unavailable.</Text><AudioPlayer key={output.uri} uri={output.uri} name={output.name} /></>
+              : <CompareAudioPlayer key={`${current.uri}|${output.uri}`} originalUri={current.uri} cleanedUri={output.uri} />}
+          <View style={styles.resultActions}><SaveButton key={output.uri} file={output} label="Save to device" style={styles.saveButton} onError={(err) => { setError(err); setShowError(true); }} />
+            <View style={styles.shareButton}><ShareBtn uri={output.uri} accessibilityLabel="Share cleaned file" /></View></View>
+        </View>}
+
+        {current.status === "failed" && <View>
+          <View style={styles.errorCard}><Feather name="alert-circle" size={19} color={theme.COLORS.error} /><Text style={styles.errorText}>{current.error || "Processing failed."}</Text></View>
+          <TouchableOpacity accessibilityRole="button" onPress={() => { setError(current.errorDetail ?? new Error(current.error || "Processing failed.")); setShowError(true); }} style={styles.errorDetailsButton}>
+            <Text style={styles.errorDetailsText}>View and copy error details</Text>
+          </TouchableOpacity>
+        </View>}
+        {current.status === "cancelled" && <Text style={styles.helper}>Stopped safely. You can retry this file.</Text>}
+
+        {(!output || current.kind === "video" || current.trimEnabled) && <View style={styles.card}>
           <View style={styles.cardHeader}><Text style={styles.cardTitle}>ORIGINAL FILE</Text><Text style={styles.muted}>{current.kind.toUpperCase()}</Text></View>
-          {current.outputUri && current.kind === "audio" && !current.trimEnabled
-            ? <Text numberOfLines={1} style={styles.originalName}>{current.name}</Text>
-            : current.kind === "video" ? <VideoPlayer key={current.uri} uri={current.uri} name={current.name} />
-              : <AudioPlayer key={current.uri} uri={current.uri} name={current.name} />}
-        </View>
+          {current.kind === "video" ? <VideoPlayer key={current.uri} uri={current.uri} name={current.name} />
+            : <AudioPlayer key={current.uri} uri={current.uri} name={current.name} />}
+        </View>}
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>BEFORE YOU PROCESS</Text>
+          <Text style={styles.cardTitle}>{output ? "OUTPUT DETAILS" : "BEFORE YOU PROCESS"}</Text>
           <Text style={styles.helper}>Output audio is 48 kHz mono. Keep the original file.</Text>
           {hasVideo && <Text style={styles.helper}>Video output contains one video track and the cleaned audio. Subtitles, extra tracks and some metadata may be omitted; unsupported video may be re-encoded at 30 fps.</Text>}
         </View>
@@ -221,23 +240,6 @@ export default function ProcessScreen() {
           {stopping && <Text style={styles.helper}>An Android decode or export already in progress may need to finish first.</Text>}
         </View>}
 
-        {current.status === "failed" && <View>
-          <View style={styles.errorCard}><Feather name="alert-circle" size={19} color={theme.COLORS.error} /><Text style={styles.errorText}>{current.error || "Processing failed."}</Text></View>
-          <TouchableOpacity accessibilityRole="button" onPress={() => { setError(current.errorDetail ?? new Error(current.error || "Processing failed.")); setShowError(true); }} style={styles.errorDetailsButton}>
-            <Text style={styles.errorDetailsText}>View and copy error details</Text>
-          </TouchableOpacity>
-        </View>}
-        {current.status === "cancelled" && <Text style={styles.helper}>Stopped safely. You can retry this file.</Text>}
-
-        {output && <View style={styles.result}>
-          <View style={styles.cardHeader}><View style={styles.resultBadge}><Feather name="check" size={13} color={theme.COLORS.success} /><Text style={styles.resultBadgeText}>CLEANED</Text></View>
-            <Text style={styles.muted}>{current.cached ? "Cached result" : `Processed in ${duration(current.seconds ?? 0)}`}</Text></View>
-          {current.kind === "video" ? <VideoPlayer key={output.uri} uri={output.uri} name={output.name} />
-            : current.trimEnabled ? <><Text style={styles.helper}>Silence trimming changes the timeline, so synchronized comparison is unavailable.</Text><AudioPlayer key={output.uri} uri={output.uri} name={output.name} /></>
-              : <CompareAudioPlayer key={`${current.uri}|${output.uri}`} originalUri={current.uri} cleanedUri={output.uri} />}
-          <View style={styles.resultActions}><SaveButton key={output.uri} file={output} label="Save to device" style={styles.saveButton} onError={(err) => { setError(err); setShowError(true); }} />
-            <View style={styles.shareButton}><ShareBtn uri={output.uri} /></View></View>
-        </View>}
       </ScrollView>
       <View style={[styles.footer, { paddingBottom: Math.max(12, insets.bottom) }]}>
         {isProcessing ? <TouchableOpacity style={styles.stopButton} onPress={stop} disabled={stopping}>
@@ -246,7 +248,7 @@ export default function ProcessScreen() {
           : <View style={styles.footerRow}>
             {doneCount > 0 && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Choose new media" onPress={() => router.replace("/")} style={styles.newButton}><Feather name="plus" size={19} color={theme.COLORS.primary} /></TouchableOpacity>}
             <TouchableOpacity accessibilityRole="button" accessibilityState={{ disabled: !settingsReady }} disabled={!settingsReady}
-              style={[theme.Styles.button, { flex: 1 }, !settingsReady && styles.disabled]} onPress={() => void run()}><Feather name="zap" size={18} color={theme.COLORS.background} style={{ marginRight: 8 }} /><Text style={theme.Styles.buttonText}>{!settingsReady ? "Loading settings…" : pendingCount === 0 ? "Process again" : items.length === 1 ? "Start denoising" : `Process ${pendingCount} file${pendingCount === 1 ? "" : "s"}`}</Text></TouchableOpacity>
+              style={[theme.Styles.button, { flex: 1 }, pendingCount === 0 && styles.rerunButton, !settingsReady && styles.disabled]} onPress={() => void run()}><Feather name="zap" size={18} color={pendingCount === 0 ? theme.COLORS.primary : theme.COLORS.background} style={{ marginRight: 8 }} /><Text style={[theme.Styles.buttonText, pendingCount === 0 && styles.rerunText]}>{!settingsReady ? "Loading settings…" : pendingCount === 0 ? "Process again" : items.length === 1 ? "Start denoising" : `Process ${pendingCount} file${pendingCount === 1 ? "" : "s"}`}</Text></TouchableOpacity>
           </View>}
       </View>
       <ErrorModal context="process" visible={showError} error={error} onClose={() => setShowError(false)} />
@@ -262,7 +264,7 @@ const styles = StyleSheet.create({
   headerBadge: { backgroundColor: "rgba(0,229,255,0.08)", paddingHorizontal: 10, paddingVertical: 7, borderRadius: 10 }, headerBadgeText: { color: theme.COLORS.primary, fontWeight: "800", fontSize: 10 },
   card: { backgroundColor: theme.COLORS.surface, borderRadius: 20, padding: 16, borderWidth: 1, borderColor: theme.COLORS.border, marginBottom: 14 },
   cardHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }, cardTitle: { color: theme.COLORS.subtext, fontSize: 11, fontWeight: "800", letterSpacing: 1 }, muted: { color: theme.COLORS.subtext, fontSize: 11 },
-  originalName: { color: theme.COLORS.text, fontSize: 15, fontWeight: "700" },
+  originalName: { color: theme.COLORS.subtext, fontSize: 13, marginBottom: 14 },
   queueRow: { flexDirection: "row", alignItems: "center", gap: 10, borderRadius: 12, padding: 10 }, queueRowActive: { backgroundColor: "rgba(0,229,255,0.08)" },
   queueName: { color: theme.COLORS.text, fontSize: 13, fontWeight: "700" }, queueStatus: { color: theme.COLORS.subtext, fontSize: 11, marginTop: 3 },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: theme.COLORS.border }, statusDone: { backgroundColor: theme.COLORS.success }, statusFailed: { backgroundColor: theme.COLORS.error }, statusWorking: { backgroundColor: theme.COLORS.primary },
@@ -271,9 +273,11 @@ const styles = StyleSheet.create({
   progressTrack: { height: 7, borderRadius: 5, backgroundColor: theme.COLORS.border, overflow: "hidden" }, progressFill: { height: "100%", backgroundColor: theme.COLORS.primary },
   errorCard: { flexDirection: "row", gap: 10, padding: 15, backgroundColor: "rgba(239,68,68,0.1)", borderRadius: 16, marginTop: 14 }, errorText: { flex: 1, color: theme.COLORS.text, fontSize: 13 },
   errorDetailsButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: 12 }, errorDetailsText: { color: theme.COLORS.primary, fontSize: 13, fontWeight: "700" },
-  result: { backgroundColor: theme.COLORS.surface, borderRadius: 20, padding: 16, borderWidth: 1, borderColor: "#1C6B66", marginTop: 14 }, resultBadge: { flexDirection: "row", alignItems: "center", gap: 5 }, resultBadgeText: { color: theme.COLORS.success, fontSize: 11, fontWeight: "800", letterSpacing: 0.8 },
+  result: { backgroundColor: theme.COLORS.surface, borderRadius: 18, padding: 16, borderWidth: 1, borderColor: theme.COLORS.border, marginBottom: 14 },
+  resultTitle: { color: theme.COLORS.text, fontSize: 17, fontWeight: "800" },
   resultActions: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 18 }, saveButton: { flex: 1, backgroundColor: theme.COLORS.primary, height: 48, borderRadius: 13 }, shareButton: { width: 48, height: 48, alignItems: "center", justifyContent: "center", borderRadius: 13, backgroundColor: theme.COLORS.background },
   footer: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: 16, paddingTop: 12, backgroundColor: theme.COLORS.background }, footerRow: { flexDirection: "row", gap: 10 },
   newButton: { width: 54, height: 56, borderRadius: 15, borderWidth: 1, borderColor: theme.COLORS.primary, alignItems: "center", justifyContent: "center" },
+  rerunButton: { backgroundColor: "transparent", borderWidth: 1, borderColor: theme.COLORS.primary }, rerunText: { color: theme.COLORS.primary },
   stopButton: { height: 56, borderRadius: 16, borderWidth: 1, borderColor: theme.COLORS.error, flexDirection: "row", gap: 10, justifyContent: "center", alignItems: "center" }, stopText: { color: theme.COLORS.text, fontWeight: "800", fontSize: 15 },
 });

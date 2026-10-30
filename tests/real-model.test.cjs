@@ -18,8 +18,8 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), 'deepdenoiser-model-audit-'))
 fs.mkdirSync(path.join(work, 'cache'));
 fs.mkdirSync(path.join(work, 'out'));
 
-function load(name, stubs = {}) {
-  const filename = path.join(repo, 'src/scripts', name + '.ts');
+function load(name, stubs = {}, filenameOverride) {
+  const filename = filenameOverride || path.join(repo, 'src/scripts', name + '.ts');
   const source = fs.readFileSync(filename, 'utf8');
   const js = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
@@ -172,9 +172,10 @@ function correlation(input, output, lag) {
     assert.ok(afterSilence.every(Number.isFinite), 'audio after prolonged silence must stay finite');
     console.log('PASS real bundled model: alignment, final samples, strength, finite startup and 33 seconds silence');
 
-    // Exercise the same observer used by the live recorder around the real CPU model.
-    // Compare identical input through no observer, charts enabled, and charts hidden.
-    const { LiveModelMonitor } = load('liveModelMonitor');
+    // Compare the current no-observer recorder path with a test-only snapshot of
+    // the delivered 2.0.5 observer, enabled and hidden, around the real CPU model.
+    // The app does not import this historical test fixture.
+    const { LiveModelMonitor } = load('historical-observer', {}, path.join(repo, 'tests/fixtures/liveModelMonitor-2.0.5-reference.txt'));
     const liveInput = Float32Array.from({length: 48000 + 17}, (_, i) => 0.15 * Math.sin(i * .037) + 0.03 * Math.cos(i * .119));
     async function runLive(mode) {
       const state = model.createStream(5);
@@ -207,7 +208,7 @@ function correlation(input, output, lag) {
     }
     assert.ok(visualized.stats.columns.length > 0, 'real-model samples produce actual chart data');
     assert.equal(hidden.stats.columns.length, 0, 'hidden charts collect no frequency history');
-    console.log('PASS real CPU model: live display on, hidden and absent produce bit-identical audio and recurrent state');
+    console.log('PASS real CPU model: observer-free path matches the 2.0.5 enabled and hidden reference audio and recurrent state');
   } finally {
     await model.release();
     fs.rmSync(work, { recursive: true, force: true });

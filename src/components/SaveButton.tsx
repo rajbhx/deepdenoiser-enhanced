@@ -10,6 +10,7 @@ interface SaveButtonProps {
   file: fs.File | null;
   label?: string;
   savedLabel?: string;
+  savingLabel?: string;
   albumName?: string;
   style?: StyleProp<ViewStyle>;
   savedBg?: string;
@@ -17,7 +18,7 @@ interface SaveButtonProps {
   beforeSave?: () => void;
 }
 
-export default function SaveButton({ file, label = "Save to device", savedLabel = "Saved", albumName, style, savedBg, onError, beforeSave }: SaveButtonProps) {
+export default function SaveButton({ file, label = "Save to device", savedLabel = "Saved", savingLabel = "Saving file", albumName, style, savedBg, onError, beforeSave }: SaveButtonProps) {
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const saving = useRef(false);
@@ -50,7 +51,7 @@ export default function SaveButton({ file, label = "Save to device", savedLabel 
     } finally { saving.current = false; if (mounted.current) setBusy(false); }
   };
 
-  return <TouchableOpacity accessibilityRole="button" accessibilityLabel={busy ? "Saving file" : saved ? savedLabel : label}
+  return <TouchableOpacity accessibilityRole="button" accessibilityLabel={busy ? savingLabel : saved ? savedLabel : label}
     accessibilityState={{ disabled: !file || busy }} disabled={!file || busy}
     style={[styles.base, style, saved && { backgroundColor: savedBg || theme.COLORS.success }, busy && { opacity: 0.6 }]}
     onPress={() => void handleSave()} activeOpacity={0.7}>

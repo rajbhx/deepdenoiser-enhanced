@@ -1,6 +1,5 @@
 import AudioPlayer from "@/src/components/audioPlayer";
 import CompareAudioPlayer from "@/src/components/CompareAudioPlayer";
-import LiveModelView from "@/src/components/LiveModelView";
 import metadata from "@/assets/model/model_metadata.json";
 import { placeOutput } from "@/src/scripts/denoiseCache";
 import CustomSlider from "@/src/components/customSlider";
@@ -12,8 +11,7 @@ import * as theme from "@/src/constants/theme";
 import { trackAppError, trackAppEvent } from "@/src/scripts/analytics";
 import type { DeepFilterNet } from "@/src/scripts/Denoiser";
 import { AlignedDenoiseStream } from "@/src/scripts/alignedDenoiseStream";
-import { assertNativeRecorderIdle, BoundedRecordingQueue, ensureRecordingWavHeader, reconcileRecording, recordingsDir, type RecordingQueueIssue } from "@/src/scripts/recordingSafety";
-import { LiveModelMonitor } from "@/src/scripts/liveModelMonitor";
+import { assertNativeRecorderIdle, BoundedRecordingQueue, ensureRecordingWavHeader, isRecordingFailureEvent, isRecordingWorkerFailed, reconcileRecording, RecordingHeaderMismatchError, recordingsDir, type RecordingQueueIssue } from "@/src/scripts/recordingSafety";
 import { processMedia } from "@/src/scripts/processMedia";
 import { beginRun, endRun, getDenoiser } from "@/src/scripts/denoiserSingleton";
 import { recordDiagnostic, recordDiagnosticError } from "@/src/scripts/diagnostics";
@@ -31,6 +29,7 @@ import { Host, LoadingIndicator } from "@expo/ui/jetpack-compose";
 import Feather from "@expo/vector-icons/Feather";
 import {
   AudioDataEvent,
+  AudioStudioModule,
   RecordingConfig,
   useAudioRecorder,
 } from "@siteed/audio-studio";
@@ -89,7 +88,8 @@ export default function RecordingScreen() {
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [liveIssue, setLiveIssue] = useState<RecordingQueueIssue | null>(null);
-  const [liveSession, setLiveSession] = useState<{ monitor: LiveModelMonitor | null; queue: BoundedRecordingQueue } | null>(null);
+  const [queueBehind, setQueueBehind] = useState(false);
+  const [nativeFailure, setNativeFailure] = useState(false);
   // A failed Stop may leave the native writer open even after the hook reports idle.
   const [recorderUncertain, setRecorderUncertain] = useState(false);
   const [recoveryReady, setRecoveryReady] = useState(false);
@@ -115,7 +115,6 @@ export default function RecordingScreen() {
   const denoiserRef = useRef<DeepFilterNet | null>(null);
   const alignedRef = useRef<AlignedDenoiseStream | null>(null);
   const queueRef = useRef<BoundedRecordingQueue | null>(null);
-  const monitorRef = useRef<LiveModelMonitor | null>(null);
   const modelInitInFlightRef = useRef(false);
   const nativeRecordingRef = useRef<fs.File | null>(null);
   const acceptingStreamRef = useRef(false);
@@ -124,6 +123,7 @@ export default function RecordingScreen() {
   const isStartingRef = useRef(false);
   const isRecordingRef = useRef(isRecording || isPaused);
   const nativeStartedRef = useRef(false);
+  const nativeFailureRef = useRef(false);
   const mountedRef = useRef(true);
   const nativeStartPromiseRef = useRef<ReturnType<typeof startAudioRecording> | null>(null);
   const [pausedDuration, setPausedDuration] = useState(0);
@@ -169,7 +169,6 @@ export default function RecordingScreen() {
       // recordings folder and can be recovered from History on next launch.
       mountedRef.current = false;
       acceptingStreamRef.current = false;
-      monitorRef.current?.dispose();
       // A Stop/recovery operation already owns the writer and model lifetime.
       if (isStoppingRef.current) return;
       // If native Start is still pending, wait for it before asking Stop; a
@@ -197,9 +196,27 @@ export default function RecordingScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only: stop on unmount
   }, []);
 
+  // The native error event is immediate when JS is running. This one-second
+  // status check is a fallback if that event was missed while backgrounded.
+  useEffect(() => {
+    if ((!isRecording && !isPaused) || nativeFailure) return;
+    const check = () => {
+      if (isStoppingRef.current || !nativeRecordingRef.current) return;
+      try {
+        if (isRecordingWorkerFailed(AudioStudioModule.status(), nativeRecordingRef.current.uri)) {
+          nativeFailureRef.current = true;
+          setNativeFailure(true);
+        }
+      } catch { /* Keep the event path; do not claim success on status errors. */ }
+    };
+    check();
+    const timer = setInterval(check, 1000);
+    return () => clearInterval(timer);
+  }, [isRecording, isPaused, nativeFailure]);
+
   useEffect(() => {
     animRef.current?.stop();
-    if (isRecording && !isPaused) {
+    if (isRecording && !isPaused && !nativeFailure) {
       const anim = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
@@ -220,7 +237,7 @@ export default function RecordingScreen() {
       pulseAnim.setValue(1);
     }
     return () => animRef.current?.stop();
-  }, [isRecording, isPaused, pulseAnim]);
+  }, [isRecording, isPaused, nativeFailure, pulseAnim]);
 
   const handleAudioStream = async (event: AudioDataEvent) => {
     if (!acceptingStreamRef.current) return;
@@ -274,6 +291,9 @@ export default function RecordingScreen() {
       setFinalOriginalWav(null);
       setFinalDenoisedWav(null);
       setLiveIssue(null);
+      setQueueBehind(false);
+      setNativeFailure(false);
+      nativeFailureRef.current = false;
       isStoppingRef.current = false;
       nativeRecordingRef.current = null;
       if (queueRef.current) await queueRef.current.drain();
@@ -290,18 +310,8 @@ export default function RecordingScreen() {
       }
       denoiserRef.current = denoiser;
       const state = denoiser.createStream(attenLimDb);
-      // Visualization is optional: it must never stop recording or change model samples.
-      monitorRef.current?.dispose();
-      let monitor: LiveModelMonitor | null = null;
-      try { monitor = new LiveModelMonitor(); }
-      catch (monitorError) { console.warn("Live visualization could not start:", monitorError); }
-      monitorRef.current = monitor;
       const aligned = new AlignedDenoiseStream(HOP_SIZE, metadata.algorithmic_delay_samples,
-        async (frame, output) => {
-          const result = await denoiser.processFrame(state, frame, output);
-          try { monitor?.noteModelFrame(); } catch { /* display is never part of model success */ }
-          return result;
-        });
+        (frame, output) => denoiser.processFrame(state, frame, output));
       alignedRef.current = aligned;
       let queue: BoundedRecordingQueue;
       queue = new BoundedRecordingQueue(MAX_QUEUED_CHUNKS, MAX_QUEUED_SAMPLES, async samples => {
@@ -309,19 +319,23 @@ export default function RecordingScreen() {
         await writePCMChunk(origPcm, samples, true);
         const cleaned = await aligned.push(samples);
         if (cleaned.length) await writePCMChunk(denPcm, cleaned, true);
-        // Drop visualization work first if the live queue is getting behind.
-        try { monitor?.observe(samples, cleaned, queue.snapshot().pendingSamples < SAMPLE_RATE / 2); }
-        catch (monitorError) { console.warn("Live visualization skipped a chunk:", monitorError); }
       }, issue => {
         if (mountedRef.current && queueRef.current === queue) setLiveIssue(issue);
+      }, {
+        thresholdSamples: SAMPLE_RATE / 2,
+        onChange: behind => {
+          if (mountedRef.current && queueRef.current === queue) setQueueBehind(behind);
+        },
       });
       queueRef.current = queue;
-      setLiveSession({ monitor, queue });
       acceptingStreamRef.current = true;
       const dir = recordingsDir();
       // @siteed's Android API expects a filesystem path, not a file: URI.
       const outputDirectory = decodeURIComponent(dir.uri.replace(/^file:\/\//, ""));
       const recordingName = `recording_${timestamp}_${Math.random().toString(36).slice(2, 8)}_original`;
+      // Set the expected URI before native Start: a worker can fail before the
+      // Start promise resolves. Late events from older recordings are ignored.
+      nativeRecordingRef.current = new fs.File(dir, `${recordingName}.wav`);
 
       const config: RecordingConfig = {
         sampleRate: SAMPLE_RATE,
@@ -332,6 +346,13 @@ export default function RecordingScreen() {
         filename: recordingName,
         streamFormat: "float32",
         onAudioStream: handleAudioStream,
+        onRecordingInterrupted: event => {
+          if (!isStoppingRef.current && mountedRef.current && !nativeFailureRef.current &&
+              isRecordingFailureEvent(event, nativeRecordingRef.current?.uri)) {
+            nativeFailureRef.current = true;
+            setNativeFailure(true);
+          }
+        },
         keepAwake: true,
         showNotification: false,
       };
@@ -386,7 +407,7 @@ export default function RecordingScreen() {
     let nativeStopped = false;
     try {
       setIsFinalizing(true);
-      setFinalizingText("Stopping recorder...");
+      setFinalizingText("Stopping microphone and closing recorder…");
       // Do not disable callbacks before native Stop: its final event can race
       // this promise. The WAV reconciliation below also covers late callbacks.
       const stopped = await stopAudioRecording();
@@ -397,7 +418,9 @@ export default function RecordingScreen() {
       isRecordingRef.current = false;
       acceptingStreamRef.current = false;
       const queue = queueRef.current;
+      setFinalizingText("Finishing queued live audio…");
       if (queue) await queue.drain();
+      setFinalizingText("Checking the original recording…");
       const nativeWav = stopped?.fileUri ? new fs.File(stopped.fileUri) : nativeRecordingRef.current;
       if (!nativeWav?.exists || nativeWav.size <= 44) throw new Error("No audio was recorded. Please try again.");
       const totalBytes = ensureRecordingWavHeader(nativeWav);
@@ -411,12 +434,13 @@ export default function RecordingScreen() {
       let matches = false;
       if (queue && !queue.error && origPcm && denPcm && aligned) {
         try {
-          setFinalizingText("Checking recording and finishing audio...");
+          setFinalizingText("Checking recorded samples and finishing missing audio…");
           matches = await reconcileRecording(nativeWav, origPcm, async samples => {
             const cleaned = await aligned.push(samples);
             if (cleaned.length) await writePCMChunk(denPcm, cleaned, true);
           });
           if (matches) {
+            setFinalizingText("Finishing cleaned audio…");
             const tail = await aligned.finish();
             if (tail.length) await writePCMChunk(denPcm, tail, true);
             if (denPcm.size !== totalBytes) throw new Error("Cleaned recording length does not match the original");
@@ -428,8 +452,10 @@ export default function RecordingScreen() {
       }
       let savedDenoised: fs.File;
       if (matches && denPcm) {
+        setFinalizingText("Preparing cleaned WAV…");
         const denWavResult = await PCMtoWav(denPcm, SAMPLE_RATE,
           silenceTrim.enabled ? silenceTrim : undefined);
+        setFinalizingText("Saving cleaned WAV…");
         savedDenoised = await placeOutput(denWavResult.file, `recording_${Date.now()}_cleaned.wav`);
       } else {
         // A stream error or non-prefix gap must never silently corrupt output.
@@ -447,11 +473,16 @@ export default function RecordingScreen() {
     } catch (error) {
       recordDiagnosticError("record", "record-stop", error);
       acceptingStreamRef.current = false;
+      setFinalizingText("Finishing queued audio for recovery…");
       await queueRef.current?.drain();
       if (!nativeStopped) {
         setRecorderUncertain(true);
         const cause = error instanceof Error ? error : new Error(String(error));
-        setError(new Error(`The recorder could not be finalized. The original is kept in Your files. If Stop continues to fail, force-stop the app in Android settings and reopen it before recovery. ${cause.message}`));
+        setError(new Error(`The recorder could not be finalized. Audio may be missing. The original is kept in Your files. Check recorder status; if it cannot be confirmed, force-stop the app in Android settings and reopen it before recovery. ${cause.message}`));
+        setIsErrorModalVisible(true);
+      } else if (error instanceof RecordingHeaderMismatchError) {
+        // Keep both the untouched native original and the streamed backup.
+        setError(error);
         setIsErrorModalVisible(true);
       } else {
         // A streamed prefix is only a partial emergency copy. The native file
@@ -528,11 +559,13 @@ export default function RecordingScreen() {
       return;
     }
     if (isFinalizing || isStarting) {
-      Alert.alert("Please wait", "Your recording is being prepared or saved.");
+      Alert.alert("Please wait", isStarting ? "Starting the recorder…" : finalizingText);
       return;
     }
-    Alert.alert("Recording in progress", "Stop and save this recording before leaving?", [
-      { text: "Keep recording", style: "cancel" },
+    Alert.alert(nativeFailure ? "Recording stopped unexpectedly" : "Recording in progress", nativeFailure
+      ? "Audio may be missing. Stop the recorder to preserve what was captured before leaving."
+      : "Stop and save this recording before leaving?", [
+      { text: nativeFailure ? "Stay here" : "Keep recording", style: "cancel" },
       { text: "Stop and save", onPress: () => { void stopRecording(); } },
     ]);
   });
@@ -584,7 +617,7 @@ export default function RecordingScreen() {
             <Text style={[styles.timerText, (isRecording || isPaused) && styles.timerTextActive]}>
               {formatTime(isPaused ? pausedDuration : (durationMs ?? 0))}
             </Text>
-            {isRecording && !isPaused && (
+            {isRecording && !isPaused && !nativeFailure && (
               <View style={styles.recordingIndicator}>
                 <Animated.View
                   style={[
@@ -624,7 +657,7 @@ export default function RecordingScreen() {
         ) : !finalOriginalWav ? (
           <View style={styles.controlsContainer}>
             <Text accessibilityLiveRegion="polite" style={[styles.statusText, (isRecording || isPaused) && styles.activeStatusText]}>
-              {!settingsReady ? "Loading saved settings…" : denoiserFailed ? "Denoiser unavailable" : !denoiserReady ? "Preparing denoiser…" : !isRecording && !isPaused
+              {nativeFailure ? "Recording stopped unexpectedly" : !settingsReady ? "Loading saved settings…" : denoiserFailed ? "Denoiser unavailable" : !denoiserReady ? "Preparing denoiser…" : !isRecording && !isPaused
                 ? "Ready to record"
                 : isPaused ? "Recording paused"
                   : liveIssue ? "Recording · live cleaning interrupted" : "Recording"}
@@ -638,9 +671,22 @@ export default function RecordingScreen() {
             )}
             {isStarting && <Host matchContents colorScheme="dark"><LoadingIndicator color={theme.COLORS.primary} /></Host>}
 
-            {(isRecording || isPaused) && (
-              <LiveModelView monitor={liveSession?.monitor ?? null} queue={liveSession?.queue ?? null} issue={liveIssue} paused={isPaused}
-                strength={attenPreset === "custom" ? `${attenLimDb} dB mix` : attenPreset.charAt(0).toUpperCase() + attenPreset.slice(1)} />
+            {nativeFailure && (isRecording || isPaused) && (
+              <View style={styles.queueWarning} accessibilityLiveRegion="assertive">
+                <Feather name="alert-circle" size={18} color={theme.COLORS.error} />
+                <Text style={styles.queueWarningText}>The recorder stopped capturing audio. Some audio may be missing. Tap Stop to preserve the original and check recovery.</Text>
+              </View>
+            )}
+            {!nativeFailure && (isRecording || isPaused) && (liveIssue || queueBehind) && (
+              <View style={styles.queueWarning} accessibilityLiveRegion="polite">
+                <Feather name="alert-circle" size={18} color={theme.COLORS.error} />
+                <Text style={styles.queueWarningText}>
+                  {liveIssue === "error" ? "Live cleaning stopped. The app will try to finish after Stop."
+                    : liveIssue === "overloaded" ? "Live queue is full. The app will try to finish after Stop."
+                      : isPaused ? "Microphone paused; finishing queued audio."
+                        : "Live cleaning is behind the microphone. The app will try to catch up."}
+                </Text>
+              </View>
             )}
 
             {!isRecording && !isPaused ? (
@@ -727,110 +773,39 @@ export default function RecordingScreen() {
         ) : (
           <View style={styles.resultsContainer}>
             <View style={styles.resultCard}>
-              <View style={styles.resultHeader}>
-                <Feather
-                  name="volume-2"
-                  size={20}
-                  color={theme.COLORS.subtext}
-                />
-                <Text style={styles.resultTitle}>Original Audio</Text>
-              </View>
+              <Text style={styles.resultTitle}>{finalDenoisedWav ? "Recording ready" : "Original ready"}</Text>
+              <Text style={styles.resultHint}>Save a copy to your device or share it.</Text>
               {finalDenoisedWav && !silenceTrim.enabled ? (
                 <CompareAudioPlayer key={`${finalOriginalWav.uri}|${finalDenoisedWav.uri}`}
                   originalUri={finalOriginalWav.uri} cleanedUri={finalDenoisedWav.uri} />
               ) : (
-                <AudioPlayer uri={finalOriginalWav.uri} name="Original recording" />
+                <>
+                  <Text style={styles.trackLabel}>Original</Text>
+                  <AudioPlayer uri={finalOriginalWav.uri} name="Original recording" />
+                  {finalDenoisedWav && <>
+                    <Text style={styles.trackLabel}>Cleaned</Text>
+                    <AudioPlayer uri={finalDenoisedWav.uri} name="Denoised recording" />
+                    <Text style={styles.trimHint}>Silence trimming changes the timeline, so play each track separately.</Text>
+                  </>}
+                </>
               )}
               <View style={styles.resultActions}>
-                <SaveButton
-                  file={finalOriginalWav}
-                  label="Save Original"
-                  savedLabel="Saved"
-                  albumName="DeepDenoiser Recordings"
-                  style={[theme.Styles.button, styles.saveSubButton]}
-                  onError={(err) => {
-                    setError(err);
-                    setIsErrorModalVisible(true);
-                  }}
-                />
-                <ShareBtn uri={finalOriginalWav.uri} />
+                <SaveButton file={finalOriginalWav} label="Save original" savedLabel="Original saved" savingLabel="Saving original"
+                  albumName="DeepDenoiser Recordings" style={[theme.Styles.button, styles.saveSubButton]}
+                  onError={(err) => { setError(err); setIsErrorModalVisible(true); }} />
+                <ShareBtn uri={finalOriginalWav.uri} accessibilityLabel="Share original recording" />
               </View>
+              {finalDenoisedWav && <View style={styles.resultActions}>
+                <SaveButton file={finalDenoisedWav} label="Save cleaned" savedLabel="Cleaned saved" savingLabel="Saving cleaned"
+                  albumName="DeepDenoiser Recordings" style={[theme.Styles.button, styles.saveSubButton]}
+                  onError={(err) => { setError(err); setIsErrorModalVisible(true); }} />
+                <ShareBtn uri={finalDenoisedWav.uri} accessibilityLabel="Share cleaned recording" />
+              </View>}
             </View>
-
-            {finalDenoisedWav && (
-            <View
-              style={[
-                styles.resultCard,
-                {
-                  borderColor: theme.COLORS.success,
-                  borderWidth: 1,
-                  marginTop: 24,
-                },
-              ]}
-            >
-              <View style={styles.resultHeader}>
-                <View style={styles.zapIcon}>
-                  <Feather
-                    name="zap"
-                    size={16}
-                    color={theme.COLORS.background}
-                  />
-                </View>
-                <Text
-                  style={[styles.resultTitle, { color: theme.COLORS.success }]}
-                >
-                  Denoised Audio
-                </Text>
-              </View>
-              {silenceTrim.enabled ? (
-                <AudioPlayer uri={finalDenoisedWav.uri} name="Denoised recording" />
-              ) : (
-                <Text style={{ color: theme.COLORS.subtext, fontSize: 12 }}>
-                  Use the Original / Cleaned switch above to compare at the same position.
-                </Text>
-              )}
-              <View style={styles.resultActions}>
-                <SaveButton
-                  file={finalDenoisedWav}
-                  label="Save Denoised"
-                  savedLabel="Saved"
-                  albumName="DeepDenoiser Recordings"
-                  style={[
-                    theme.Styles.button,
-                    styles.saveSubButton,
-                    { backgroundColor: theme.COLORS.success },
-                  ]}
-                  savedBg={theme.COLORS.success}
-                  onError={(err) => {
-                    setError(err);
-                    setIsErrorModalVisible(true);
-                  }}
-                />
-                <ShareBtn uri={finalDenoisedWav!.uri} />
-              </View>
-            </View>
-            )}
-
-            <TouchableOpacity
-              style={[theme.Styles.button, styles.newRecordButton]}
-              onPress={() => {
-                setFinalOriginalWav(null);
-                setFinalDenoisedWav(null);
-              }}
-            >
-              <Feather
-                name="refresh-cw"
-                size={18}
-                color={theme.COLORS.primary}
-              />
-              <Text
-                style={[
-                  theme.Styles.buttonText,
-                  { color: theme.COLORS.primary },
-                ]}
-              >
-                Record New
-              </Text>
+            <TouchableOpacity accessibilityRole="button" style={[theme.Styles.button, styles.newRecordButton]}
+              onPress={() => { setFinalOriginalWav(null); setFinalDenoisedWav(null); }}>
+              <Feather name="refresh-cw" size={18} color={theme.COLORS.primary} />
+              <Text style={[theme.Styles.buttonText, { color: theme.COLORS.primary }]}>Record New</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -840,6 +815,8 @@ export default function RecordingScreen() {
         <View style={styles.fixedControls}>
           <View style={styles.controlGroup}>
             <Pressable
+              disabled={nativeFailure}
+              accessibilityState={{ disabled: nativeFailure }}
               style={({ pressed }) => [styles.controlCircle, { backgroundColor: "rgba(255, 255, 255, 0.1)", opacity: pressed ? 0.7 : 1 }]}
               accessibilityRole="button"
               accessibilityLabel={isPaused ? "Resume recording" : "Pause recording"}
@@ -985,6 +962,8 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
   activeStatusText: { marginBottom: 10, textTransform: "none", letterSpacing: 0, textAlign: "center" },
+  queueWarning: { width: "100%", flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 14, marginBottom: 16, borderRadius: 12, backgroundColor: "rgba(239,68,68,0.12)" },
+  queueWarningText: { color: theme.COLORS.text, flex: 1, fontSize: 13, lineHeight: 19 },
   retryModelButton: { minHeight: 48, paddingHorizontal: 20, justifyContent: "center", borderWidth: 1, borderColor: theme.COLORS.primary, borderRadius: 12, marginBottom: 16 },
   retryModelText: { color: theme.COLORS.primary, fontSize: 14, fontWeight: "700" },
   controlsContainer: {
@@ -1069,70 +1048,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  resultsContainer: {
-    width: "100%",
-    marginTop: 20,
-  },
-  resultCard: {
-    backgroundColor: theme.COLORS.surface,
-    borderRadius: 28,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: theme.COLORS.border,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    elevation: 4,
-  },
-  resultHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    marginBottom: 20,
-  },
-  resultTitle: {
-    fontSize: theme.FONT_SIZE.small,
-    fontWeight: "800",
-    color: theme.COLORS.subtext,
-    textTransform: "uppercase",
-    letterSpacing: 1.5,
-  },
-  resultActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 24,
-    gap: 12,
-  },
-  zapIcon: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: theme.COLORS.success,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  saveSubButton: {
-    flex: 1,
-    height: 54,
-    borderRadius: 18,
-    flexDirection: "row",
-    gap: 10,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  newRecordButton: {
-    marginTop: 48,
-    backgroundColor: "transparent",
-    borderWidth: 1,
-    borderColor: theme.COLORS.primary,
-    height: 60,
-    borderRadius: 20,
-    flexDirection: "row",
-    gap: 12,
-  },
+  resultsContainer: { width: "100%", marginTop: 20 },
+  resultCard: { backgroundColor: theme.COLORS.surface, borderRadius: 18, padding: 18, borderWidth: 1, borderColor: theme.COLORS.border },
+  resultTitle: { color: theme.COLORS.text, fontSize: 19, fontWeight: "800" },
+  resultHint: { color: theme.COLORS.subtext, fontSize: 13, lineHeight: 19, marginTop: 4, marginBottom: 18 },
+  trackLabel: { color: theme.COLORS.text, fontSize: 13, fontWeight: "700", marginTop: 12, marginBottom: 4 },
+  trimHint: { color: theme.COLORS.subtext, fontSize: 12, lineHeight: 18, marginTop: 8 },
+  resultActions: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 12 },
+  saveSubButton: { flex: 1, height: 50, borderRadius: 12, paddingHorizontal: 8 },
+  newRecordButton: { marginTop: 18, backgroundColor: "transparent", borderWidth: 1, borderColor: theme.COLORS.primary, height: 52, borderRadius: 12, gap: 10 },
 });
