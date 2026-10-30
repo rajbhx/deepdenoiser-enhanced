@@ -24,7 +24,7 @@
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
       ],
-      "versionCode": 8
+      "versionCode": 9
     },
     "plugins": [
       "./plugins/withNdkVersion",
@@ -115,6 +115,6 @@
       }
     },
     "owner": "deepdenoiser",
-    "version": "2.0.6"
+    "version": "2.0.7"
   }
 }

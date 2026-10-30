@@ -29,10 +29,10 @@ console.log('PASS Android activity and native-stack backgrounds are configured d
 
 const app = JSON.parse(source('app.json'));
 const pkg = JSON.parse(source('package.json'));
-assert.equal(app.expo.version, '2.0.6');
-assert.equal(app.expo.android.versionCode, 8);
+assert.equal(app.expo.version, '2.0.7');
+assert.equal(app.expo.android.versionCode, 9);
 assert.equal(pkg.version, app.expo.version);
-console.log('PASS test build has a distinct, consistent 2.0.6/version-code-8 identity');
+console.log('PASS test build has a distinct, consistent 2.0.7/version-code-9 identity');
 
 const modelHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'assets/model/denoiser_model.ort'))).digest('hex');
 assert.equal(modelHash, 'ec5ec24059035741763006dfaa6d463cfbbacf496caed5b5599ebe3477f2dd5b', 'the exact bundled model must remain unchanged');

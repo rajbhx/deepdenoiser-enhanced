@@ -1,6 +1,12 @@
-# DeepDenoiser Enhanced 2.0.6
+# DeepDenoiser Enhanced 2.0.7
 
 Offline AI audio and video denoising for Android using **DeepFilterNet3** and **ONNX Runtime**. This is a privacy-focused fork of [sayampy/deepdenoiser](https://github.com/sayampy/deepdenoiser).
+
+## 2.0.7 test-build candidate
+
+The direct WAV fallback now handles signed 16-bit samples correctly, writes bounded blocks, and avoids reusing potentially affected old cache keys; existing originals and finished files are kept. Decoder cleanup attempts all resources even if one release fails. Optional privacy-safe Stop checkpoints may help distinguish future recorder delays. The OnePlus 7 bug report was for 2.0.5, did not establish a DeepDenoiser ANR, and does not validate this candidate. See the [bug-report follow-up and limits](docs/2026-10-30-bugreport-followup.md).
+
+Host and GitHub checks do not replace testing on the actual phone, including fallback audio listening, recording, Stop/Back, recovery and upgrades. Test APKs are debug-signed and are not production releases.
 
 ## 2.0.6 test-build candidate
 
@@ -74,7 +80,7 @@ cd android && ./gradlew assembleRelease
 
 If a previous hard-linked Bun cache causes a patch to fail, remove `node_modules` and reinstall using `--backend=copyfile --cache-dir` pointing to a new, empty directory.
 
-The workflow runs mock regressions, an actual bundled-model CPU test, Java atomic-write/PCM/share-queue tests, and a reproducible npm notice-inventory check; it also verifies native symbols and the signing certificate in the artifact. Without release secrets, the arm64 APK is named `testing-debug-signed` and is **not for production**. Local release builds without a key are unsigned; see [release signing](docs/RELEASE_SIGNING.md). Physical-device testing is still required before release; see [the 2.0 upgrade guide](docs/UPGRADE_2.0.md).
+The workflow runs mock regressions, an actual bundled-model CPU test, Java atomic-write/PCM/share-queue tests, extracted Kotlin WAV/decoder/recorder tests, and a reproducible npm notice-inventory check; it also verifies native symbols and the signing certificate in the artifact. Without release secrets, the arm64 APK is named `testing-debug-signed` and is **not for production**. Local release builds without a key are unsigned; see [release signing](docs/RELEASE_SIGNING.md). Physical-device testing is still required before release; see [the 2.0 upgrade guide](docs/UPGRADE_2.0.md).
 
 To run the real-model regression separately on a compatible desktop:
 
